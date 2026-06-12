@@ -624,6 +624,151 @@ fn test_cross_compile_template() {
 }
 
 #[test]
+fn test_toolchain_sysroot_when_set() {
+    let tmp = TempDir::new().unwrap();
+    create_test_project(&tmp);
+    let root = tmp.path().to_path_buf();
+
+    std::fs::remove_file(root.join("link.ld")).unwrap();
+    std::fs::write(
+        root.join("STM32F103XX_FLASH.ld"),
+        "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 512K }\n",
+    )
+    .unwrap();
+
+    let sources = scan_project(&root);
+    let discoverer = ModuleDiscoverer::new(ScanOptions {
+        exclude_dirs: vec![],
+        root: root.clone(),
+    });
+    let modules = discoverer.discover(&sources).unwrap();
+
+    let config = ProjectConfig {
+        name: "SysrootTest".into(),
+        version: "0.1.0".into(),
+        root: root.clone(),
+        language: "C".into(),
+        c_standard: "11".into(),
+        cpp_standard: "17".into(),
+        target_arch: fb_gen::models::project::TargetArch::NoneEabi,
+        toolchain: Some(fb_gen::models::project::ToolchainConfig {
+            cpu: "cortex-m4".into(),
+            prefix: "arm-none-eabi-".into(),
+            sysroot: Some("/opt/gcc-arm/arm-none-eabi".into()),
+            find_root_path: vec!["/custom/lib".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let generator = CMakeGenerator::new(&config).unwrap();
+    let empty_graph = DependencyGraph::new();
+    generator.generate(&modules, &empty_graph, true, &[]).unwrap();
+
+    let toolchain_path = root.join("cmake").join("toolchain.cmake");
+    assert!(toolchain_path.exists());
+    let content = std::fs::read_to_string(&toolchain_path).unwrap();
+
+    assert!(
+        content.contains("set(CMAKE_SYSROOT /opt/gcc-arm/arm-none-eabi)"),
+        "toolchain.cmake should set CMAKE_SYSROOT when sysroot is Some"
+    );
+    assert!(
+        content.contains("set(CMAKE_FIND_ROOT_PATH ${CMAKE_SYSROOT} /custom/lib)"),
+        "toolchain.cmake should set CMAKE_FIND_ROOT_PATH with sysroot + extra paths"
+    );
+}
+
+#[test]
+fn test_toolchain_no_sysroot_when_none() {
+    let tmp = TempDir::new().unwrap();
+    create_test_project(&tmp);
+    let root = tmp.path().to_path_buf();
+
+    std::fs::remove_file(root.join("link.ld")).unwrap();
+
+    let sources = scan_project(&root);
+    let discoverer = ModuleDiscoverer::new(ScanOptions {
+        exclude_dirs: vec![],
+        root: root.clone(),
+    });
+    let modules = discoverer.discover(&sources).unwrap();
+
+    let config = ProjectConfig {
+        name: "NoSysrootTest".into(),
+        version: "0.1.0".into(),
+        root: root.clone(),
+        language: "C".into(),
+        c_standard: "11".into(),
+        cpp_standard: "17".into(),
+        target_arch: fb_gen::models::project::TargetArch::NoneEabi,
+        toolchain: Some(fb_gen::models::project::ToolchainConfig {
+            cpu: "cortex-m3".into(),
+            prefix: "arm-none-eabi-".into(),
+            sysroot: None,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let generator = CMakeGenerator::new(&config).unwrap();
+    let empty_graph = DependencyGraph::new();
+    generator.generate(&modules, &empty_graph, true, &[]).unwrap();
+
+    let toolchain_path = root.join("cmake").join("toolchain.cmake");
+    let content = std::fs::read_to_string(&toolchain_path).unwrap();
+
+    assert!(
+        !content.contains("CMAKE_SYSROOT"),
+        "toolchain.cmake should NOT set CMAKE_SYSROOT when sysroot is None"
+    );
+    assert!(
+        content.contains("set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)"),
+        "FIND_ROOT_PATH_MODE should always be present"
+    );
+}
+
+#[test]
+fn test_toolchain_generated_for_arm32_with_prefix() {
+    let tmp = TempDir::new().unwrap();
+    create_test_project(&tmp);
+    let root = tmp.path().to_path_buf();
+
+    std::fs::remove_file(root.join("link.ld")).unwrap();
+
+    let sources = scan_project(&root);
+    let discoverer = ModuleDiscoverer::new(ScanOptions {
+        exclude_dirs: vec![],
+        root: root.clone(),
+    });
+    let modules = discoverer.discover(&sources).unwrap();
+
+    let config = ProjectConfig {
+        name: "ARM32Test".into(),
+        root: root.clone(),
+        language: "C".into(),
+        target_arch: fb_gen::models::project::TargetArch::ARM32,
+        toolchain: Some(fb_gen::models::project::ToolchainConfig {
+            prefix: "arm-linux-gnueabihf-".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let generator = CMakeGenerator::new(&config).unwrap();
+    let empty_graph = DependencyGraph::new();
+    generator.generate(&modules, &empty_graph, true, &[]).unwrap();
+
+    let toolchain_path = root.join("cmake").join("toolchain.cmake");
+    assert!(
+        toolchain_path.exists(),
+        "ARM32 with prefix should generate toolchain.cmake"
+    );
+    let content = std::fs::read_to_string(&toolchain_path).unwrap();
+    assert!(content.contains("arm-linux-gnueabihf-"));
+}
+
+#[test]
 fn test_toolchain_riscv64() {
     // Verify RISCV64 generates riscv64-unknown-elf- toolchain without MCU flags.
     let tmp = TempDir::new().unwrap();
