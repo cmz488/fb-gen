@@ -35,6 +35,43 @@ pub enum BuildBackend {
     Custom(String),
 }
 
+/// Structured toolchain configuration for embedded cross-compilation targets.
+/// `None` when the target architecture does not need a toolchain file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolchainConfig {
+    /// CPU / chip model (e.g. "cortex-m3", "cortex-m4").
+    /// Generates the `-mcpu=` flag. Required for NoneEabi.
+    pub cpu: String,
+
+    /// Floating-point ABI: "soft", "softfp", or "hard". Skipped when empty.
+    /// Generates the `-mfloat-abi=` flag.
+    pub float_abi: String,
+
+    /// FPU unit (e.g. "fpv4-sp-d16", "fpv5-d16"). Skipped when empty.
+    /// Generates the `-mfpu=` flag.
+    pub fpu: String,
+
+    /// Raw compiler/linker flags (e.g. "-mthumb", "-march=rv32imac").
+    /// Appended verbatim to TARGET_FLAGS.
+    pub extra_flags: String,
+
+    /// Linker script path relative to the project root.
+    /// Generates `-T <path>` linker flag.
+    pub linker_script: String,
+}
+
+impl Default for ToolchainConfig {
+    fn default() -> Self {
+        Self {
+            cpu: String::new(),
+            float_abi: String::new(),
+            fpu: String::new(),
+            extra_flags: String::new(),
+            linker_script: String::new(),
+        }
+    }
+}
+
 /// Top-level project configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
@@ -55,8 +92,9 @@ pub struct ProjectConfig {
     pub generated_at: String,
     pub cmake_presets: Option<CMakePresets>,
     pub toolchain_files: Vec<PathBuf>,
-    /// MCU/CPU flags for cross-compilation (e.g. "cortex-m3")
-    pub mcu_flags: String,
+    /// Toolchain configuration for cross-compilation targets.
+    /// `None` when the target architecture does not require a toolchain file.
+    pub toolchain: Option<ToolchainConfig>,
 }
 
 impl Default for ProjectConfig {
@@ -79,7 +117,7 @@ impl Default for ProjectConfig {
             generated_at: String::new(),
             cmake_presets: None,
             toolchain_files: vec![],
-            mcu_flags: String::new(),
+            toolchain: None,
     }
     }
 }
