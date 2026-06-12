@@ -583,11 +583,6 @@ fn render_arm_eabi_toolchain(tc: &ToolchainConfig) -> String {
     render_embedded_toolchain("Generic", "arm", prefix, tc)
 }
 
-fn render_aarch64_toolchain(tc: &ToolchainConfig) -> String {
-    let prefix = "aarch64-none-elf-";
-    render_embedded_toolchain("Generic", "aarch64", prefix, tc)
-}
-
 fn render_riscv64_toolchain(tc: &ToolchainConfig) -> String {
     let prefix = "riscv64-unknown-elf-";
     render_embedded_toolchain("Generic", "riscv64", prefix, tc)

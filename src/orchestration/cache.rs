@@ -215,7 +215,7 @@ impl MetaCache {
                 .get("toolchain_files")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default(),
-            mcu_flags: String::new(),
+            toolchain: None,
         };
 
         let dependency_graph: crate::models::DependencySnapshot =
@@ -313,7 +313,7 @@ mod tests {
                 generated_at: String::new(),
                 cmake_presets: None,
                 toolchain_files: vec![],
-                mcu_flags: String::new(),
+                toolchain: None,
             },
             modules: vec![],
             dependency_graph: DependencySnapshot {

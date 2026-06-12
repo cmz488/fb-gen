@@ -285,7 +285,7 @@ mod tests {
             generated_at: String::new(),
             cmake_presets: None,
             toolchain_files: vec![],
-            mcu_flags: String::new(),
+            toolchain: None,
         }
     }
 
