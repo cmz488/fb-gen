@@ -10,7 +10,8 @@ use crate::core::{CMakeGenerator, DependencyAnalyzer, ModuleDiscoverer};
 use crate::models::dependency::DependencyGraph;
 use crate::models::module::SourceFile;
 use crate::models::{
-    BuildBackend, CMakeModule, DependencySnapshot, FbGenError, ProjectConfig, ProjectMeta, Result,
+    BuildBackend, CMakeModule, DependencySnapshot, FbGenError, FbGenResult, ProjectConfig,
+    ProjectMeta,
 };
 use crate::orchestration::{FileWatcher, MetaCache, Reporter, UserQuery};
 use crate::scanner::{self, FffScanner};
@@ -26,9 +27,19 @@ fn scanner_opts(cli: &Cli, config: &ProjectConfig) -> scanner::ScanOptions {
     };
 
     let languages = vec![
-        "c".into(), "cpp".into(), "cc".into(), "cxx".into(), "c++".into(),
-        "h".into(), "hpp".into(), "hh".into(), "hxx".into(), "h++".into(),
-        "s".into(), "S".into(), "ld".into(),
+        "c".into(),
+        "cpp".into(),
+        "cc".into(),
+        "cxx".into(),
+        "c++".into(),
+        "h".into(),
+        "hpp".into(),
+        "hh".into(),
+        "hxx".into(),
+        "h++".into(),
+        "s".into(),
+        "S".into(),
+        "ld".into(),
     ];
 
     let exclude_dirs = if cli.exclude.is_empty() {
@@ -67,18 +78,19 @@ fn scan_and_discover(
     cli: &Cli,
     config: &ProjectConfig,
     reporter: &Reporter,
-) -> Result<(Vec<CMakeModule>, Option<DependencyGraph>)> {
+) -> FbGenResult<(Vec<CMakeModule>, Option<DependencyGraph>, Vec<PathBuf>)> {
     // ── Scan ──
-    reporter.report_info(&format!("Scanning sources in {} ...", config.root.display()));
+    reporter.report_info(&format!(
+        "Scanning sources in {} ...",
+        config.root.display()
+    ));
     let s_opts = scanner_opts(cli, config);
     let scanner = FffScanner::new(&s_opts.root);
     let sources = scanner.scan_source_files(&s_opts)?;
     reporter.report_success(&format!("Found {} source/header files", sources.len()));
 
     if sources.is_empty() {
-        return Err(FbGenError::NoSources(
-            config.root.display().to_string(),
-        ));
+        return Err(FbGenError::NoSources(config.root.display().to_string()));
     }
 
     // ── Discover ──
@@ -96,7 +108,9 @@ fn scan_and_discover(
         let graph = analyzer.analyze(&modules)?;
         let deps = graph.edge_count();
         if graph.has_cycles() {
-            reporter.report_warning("Dependency graph contains cycles — manual adjustment may be needed");
+            reporter.report_warning(
+                "Dependency graph contains cycles — manual adjustment may be needed",
+            );
         }
         reporter.report_success(&format!("Found {} dependencies", deps));
         Some(graph)
@@ -105,13 +119,22 @@ fn scan_and_discover(
         None
     };
 
-    Ok((modules, graph))
+    // ── Detect user-defined CMakeLists ──
+    let user_modules = scanner.scan_user_cmake_files(&config.root, &config.exclude_dirs);
+    if !user_modules.is_empty() {
+        reporter.report_info(&format!(
+            "Found {} user-defined CMake module(s)",
+            user_modules.len()
+        ));
+    }
+
+    Ok((modules, graph, user_modules))
 }
 
 // ── commands ───────────────────────────────────────────────────────────────
 
 /// `fb-gen init` — interactive first-time project setup.
-pub fn cmd_init(cli: &Cli, name: Option<&str>) -> Result<()> {
+pub fn cmd_init(cli: &Cli, name: Option<&str>) -> FbGenResult<()> {
     let reporter = Reporter::new(cli.quiet);
 
     // ── Collect config ──
@@ -142,7 +165,7 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>) -> Result<()> {
 
     // ── Pipeline ──
     let start = Instant::now();
-    let (modules, graph) = scan_and_discover(cli, &config, &reporter)?;
+    let (modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
 
     // ── Generate ──
     reporter.report_info("Generating CMakeLists.txt files ...");
@@ -150,7 +173,7 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>) -> Result<()> {
 
     let empty_graph = DependencyGraph::new();
     let ref_graph = graph.as_ref().unwrap_or(&empty_graph);
-    generator.generate(&modules, ref_graph, true)?;
+    generator.generate(&modules, ref_graph, true, &user_modules)?;
     reporter.report_success("CMakeLists.txt files generated");
 
     // ── Scan presets & toolchain files ──
@@ -177,7 +200,10 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>) -> Result<()> {
         "Done in {:.1}s — {} modules, {} files",
         elapsed.as_secs_f64(),
         modules.len(),
-        modules.iter().map(|m| m.sources.len() + m.headers.len()).sum::<usize>()
+        modules
+            .iter()
+            .map(|m| m.sources.len() + m.headers.len())
+            .sum::<usize>()
     ));
 
     Ok(())
@@ -187,7 +213,7 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>) -> Result<()> {
 ///
 /// Instead of a full re-scan, this uses `ProjectMeta` from `.fb-gen/cache/`
 /// to detect exactly which files changed, then only re-processes affected modules.
-pub fn cmd_sync(cli: &Cli) -> Result<()> {
+pub fn cmd_sync(cli: &Cli) -> FbGenResult<()> {
     let reporter = Reporter::new(cli.quiet);
     let root = resolve_root(cli)?;
 
@@ -197,9 +223,9 @@ pub fn cmd_sync(cli: &Cli) -> Result<()> {
         return Ok(());
     }
 
-    let mut prev_meta = cache.load().ok_or_else(|| {
-        FbGenError::Config("Failed to load cached metadata".into())
-    })?;
+    let mut prev_meta = cache
+        .load()
+        .ok_or_else(|| FbGenError::Config("Failed to load cached metadata".into()))?;
 
     let config = prev_meta.config.clone();
 
@@ -232,7 +258,12 @@ pub fn cmd_sync(cli: &Cli) -> Result<()> {
         if !path.exists() {
             // ── Deleted ──
             deleted_paths.push(path.clone());
-            remove_file_from_modules(&mut modules, path, &mut affected_modules, &mut module_list_changed);
+            remove_file_from_modules(
+                &mut modules,
+                path,
+                &mut affected_modules,
+                &mut module_list_changed,
+            );
         } else if is_c_cpp_file(path) {
             // ── Added or Modified ──
             let sf = match scanner.scan_single(path) {
@@ -247,20 +278,33 @@ pub fn cmd_sync(cli: &Cli) -> Result<()> {
             if existed_before {
                 // Modified: update existing SourceFile and check if includes changed
                 let old_includes = find_old_includes(&modules, path);
-                if old_includes.as_ref().map(|oi| *oi != sf.includes).unwrap_or(true) {
+                if old_includes
+                    .as_ref()
+                    .map(|oi| *oi != sf.includes)
+                    .unwrap_or(true)
+                {
                     includes_changed = true;
                 }
                 update_file_in_modules(&mut modules, sf, &mut affected_modules);
             } else {
                 // Added: insert into appropriate module
-                add_file_to_modules(&mut modules, sf, &root, &config.exclude_dirs, &mut affected_modules, &mut module_list_changed);
+                add_file_to_modules(
+                    &mut modules,
+                    sf,
+                    &root,
+                    &config.exclude_dirs,
+                    &mut affected_modules,
+                    &mut module_list_changed,
+                );
             }
         }
     }
 
     // Remove deleted paths from checksums
     for dp in &deleted_paths {
-        prev_meta.file_checksums.remove(&dp.to_string_lossy().to_string());
+        prev_meta
+            .file_checksums
+            .remove(&dp.to_string_lossy().to_string());
     }
 
     if affected_modules.is_empty() && !module_list_changed {
@@ -288,8 +332,9 @@ pub fn cmd_sync(cli: &Cli) -> Result<()> {
     // The generator's diff-check skips files whose content hasn't changed,
     // so only genuinely affected files are re-written.
     reporter.report_info("Regenerating affected CMakeLists.txt ...");
+    let user_modules = scanner.scan_user_cmake_files(&root, &config.exclude_dirs);
     let generator = CMakeGenerator::new(&config)?;
-    generator.generate(&modules, &graph, false)?;
+    generator.generate(&modules, &graph, false, &user_modules)?;
     reporter.report_success(&format!("{} module(s) updated", n_affected));
 
     // ── 5. Merge checksums and save updated meta ──
@@ -300,7 +345,8 @@ pub fn cmd_sync(cli: &Cli) -> Result<()> {
         edges: modules
             .iter()
             .flat_map(|m| {
-                graph.get_dependencies(&m.name)
+                graph
+                    .get_dependencies(&m.name)
                     .into_iter()
                     .map(|(dep_name, _)| (m.name.clone(), dep_name))
             })
@@ -337,16 +383,19 @@ fn is_c_cpp_file(path: &Path) -> bool {
         .to_lowercase();
     matches!(
         ext.as_str(),
-        "c" | "cpp" | "cc" | "cxx" | "c++"
-            | "h" | "hpp" | "hh" | "hxx" | "h++"
-            | "s" | "ld"
+        "c" | "cpp" | "cc" | "cxx" | "c++" | "h" | "hpp" | "hh" | "hxx" | "h++" | "s" | "ld"
     )
 }
 
 /// Find the old includes list for a file in the cached modules.
 fn find_old_includes(modules: &[CMakeModule], path: &Path) -> Option<Vec<String>> {
     for m in modules {
-        for sf in m.sources.iter().chain(m.headers.iter()).chain(m.asm_sources.iter()) {
+        for sf in m
+            .sources
+            .iter()
+            .chain(m.headers.iter())
+            .chain(m.asm_sources.iter())
+        {
             if sf.path == path {
                 return Some(sf.includes.clone());
             }
@@ -511,11 +560,16 @@ fn save_meta_cache(
     modules: &[CMakeModule],
     graph: Option<&DependencyGraph>,
     config: &ProjectConfig,
-) -> Result<()> {
+) -> FbGenResult<()> {
     let cache = MetaCache::new(root);
     let all_paths: Vec<PathBuf> = modules
         .iter()
-        .flat_map(|m| m.sources.iter().chain(m.headers.iter()).map(|sf| sf.path.clone()))
+        .flat_map(|m| {
+            m.sources
+                .iter()
+                .chain(m.headers.iter())
+                .map(|sf| sf.path.clone())
+        })
         .collect();
     let checksums = cache.compute_checksums(&all_paths);
 
@@ -532,7 +586,10 @@ fn save_meta_cache(
                 .collect(),
         }
     } else {
-        DependencySnapshot { nodes: vec![], edges: vec![] }
+        DependencySnapshot {
+            nodes: vec![],
+            edges: vec![],
+        }
     };
 
     let meta = ProjectMeta {
@@ -546,7 +603,7 @@ fn save_meta_cache(
 }
 
 /// `fb-gen check` — compare generated CMake against existing files.
-pub fn cmd_check(cli: &Cli) -> Result<()> {
+pub fn cmd_check(cli: &Cli) -> FbGenResult<()> {
     let reporter = Reporter::new(cli.quiet);
     let root = resolve_root(cli)?;
 
@@ -562,10 +619,11 @@ pub fn cmd_check(cli: &Cli) -> Result<()> {
         ..Default::default()
     };
 
-    let (modules, graph) = scan_and_discover(cli, &config, &reporter)?;
+    let (modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
 
     // Generate into memory (write to temp location, then compare).
-    let tmp_dir = tempfile::TempDir::new().map_err(|e| FbGenError::Config(format!("tempdir: {e}")))?;
+    let tmp_dir =
+        tempfile::TempDir::new().map_err(|e| FbGenError::Config(format!("tempdir: {e}")))?;
     let tmp_root = tmp_dir.path();
 
     // Generate root CMakeLists.txt to temp.
@@ -583,7 +641,7 @@ pub fn cmd_check(cli: &Cli) -> Result<()> {
     let generator = CMakeGenerator::new(&tmp_config)?;
     let empty_graph = DependencyGraph::new();
     let ref_graph = graph.as_ref().unwrap_or(&empty_graph);
-    generator.generate(&modules, ref_graph, false)?;
+    generator.generate(&modules, ref_graph, false, &user_modules)?;
     let mut diffs = 0usize;
     // Root CMakeLists.txt
     let gen_root = tmp_root.join("CMakeLists.txt");
@@ -611,7 +669,7 @@ pub fn cmd_check(cli: &Cli) -> Result<()> {
 }
 
 /// `fb-gen validate` — run cmake to verify generated configuration.
-pub fn cmd_validate(cli: &Cli) -> Result<()> {
+pub fn cmd_validate(cli: &Cli) -> FbGenResult<()> {
     let reporter = Reporter::new(cli.quiet);
     let root = resolve_root(cli)?;
 
@@ -661,7 +719,7 @@ pub fn cmd_validate(cli: &Cli) -> Result<()> {
 }
 
 /// `fb-gen run` — full build pipeline (generate + cmake --build).
-pub fn cmd_run(cli: &Cli) -> Result<()> {
+pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
     let reporter = Reporter::new(cli.quiet);
 
     // Ensure CMakeLists.txt are up to date first.
@@ -681,7 +739,10 @@ pub fn cmd_run(cli: &Cli) -> Result<()> {
     };
 
     let config = if cache.exists() {
-        cache.load().map(|m| m.config).unwrap_or_else(fallback_config)
+        cache
+            .load()
+            .map(|m| m.config)
+            .unwrap_or_else(fallback_config)
     } else {
         fallback_config()
     };
@@ -692,11 +753,11 @@ pub fn cmd_run(cli: &Cli) -> Result<()> {
     let root_cmake = root.join("CMakeLists.txt");
     if !root_cmake.exists() {
         reporter.report_info("No CMakeLists.txt found — generating ...");
-        let (modules, graph) = scan_and_discover(cli, &config, &reporter)?;
+        let (modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
         let generator = CMakeGenerator::new(&config)?;
         let empty_graph = DependencyGraph::new();
         let ref_graph = graph.as_ref().unwrap_or(&empty_graph);
-        generator.generate(&modules, ref_graph, false)?;
+        generator.generate(&modules, ref_graph, false, &user_modules)?;
         // Save cache for future incremental syncs.
         save_meta_cache(&root, &modules, graph.as_ref(), &config)?;
     }
@@ -731,11 +792,16 @@ pub fn cmd_run(cli: &Cli) -> Result<()> {
         .map_err(|e| FbGenError::Config(format!("cmake: {e}")))?;
 
     if !status.success() {
-        return Err(FbGenError::GenerationFailed("cmake configure failed".into()));
+        return Err(FbGenError::GenerationFailed(
+            "cmake configure failed".into(),
+        ));
     }
 
     // Build.
-    reporter.report_info(&format!("Building with cmake --build {} ...", build_dir.display()));
+    reporter.report_info(&format!(
+        "Building with cmake --build {} ...",
+        build_dir.display()
+    ));
     let start = Instant::now();
 
     let status = Command::new("cmake")
@@ -757,7 +823,7 @@ pub fn cmd_run(cli: &Cli) -> Result<()> {
 
 // ── internal helpers ───────────────────────────────────────────────────────
 
-fn resolve_root(cli: &Cli) -> Result<PathBuf> {
+fn resolve_root(cli: &Cli) -> FbGenResult<PathBuf> {
     if cli.root == PathBuf::from(".") {
         std::env::current_dir().map_err(|e| FbGenError::Config(format!("cwd: {e}")))
     } else {
@@ -837,14 +903,23 @@ fn cmake_generator_flag(config: &ProjectConfig) -> Vec<String> {
 /// Returns `-DCMAKE_TOOLCHAIN_FILE=...` args for cross-compilation targets.
 fn cmake_toolchain_args(config: &ProjectConfig) -> Vec<String> {
     use crate::models::project::TargetArch;
-    let is_cross = !matches!(config.target_arch,
-        TargetArch::X86_64 | TargetArch::X86 | TargetArch::Custom(_));
-    if !is_cross { return vec![]; }
+    let is_cross = !matches!(
+        config.target_arch,
+        TargetArch::X86_64 | TargetArch::X86 | TargetArch::Custom(_)
+    );
+    if !is_cross {
+        return vec![];
+    }
 
     // Prefer path from CMakePresets.
-    let path = config.cmake_presets.as_ref()
-        .and_then(|p| p.configure_presets.iter()
-            .find_map(|cp| cp.toolchain_file.as_ref()))
+    let path = config
+        .cmake_presets
+        .as_ref()
+        .and_then(|p| {
+            p.configure_presets
+                .iter()
+                .find_map(|cp| cp.toolchain_file.as_ref())
+        })
         .map(|tf| config.root.join(tf))
         .unwrap_or_else(|| config.root.join("cmake").join("toolchain.cmake"));
 
@@ -857,10 +932,15 @@ fn cmake_toolchain_args(config: &ProjectConfig) -> Vec<String> {
 
 /// Load config from cache, or return a default (for validate).
 fn load_or_default_config(root: &Path, output_dir: &Path) -> ProjectConfig {
-    MetaCache::new(root).load()
+    MetaCache::new(root)
+        .load()
         .map(|m| m.config)
         .unwrap_or_else(|| ProjectConfig {
-            name: root.file_name().and_then(|n| n.to_str()).unwrap_or("project").into(),
+            name: root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project")
+                .into(),
             root: root.to_path_buf(),
             output_dir: output_dir.to_path_buf(),
             exclude_dirs: vec!["build".into(), ".git".into(), "third_party".into()],
