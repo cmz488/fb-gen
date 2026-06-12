@@ -382,6 +382,9 @@ impl UserQuery {
         println!("  Output dir:        {}", config.output_dir.display());
         if let Some(ref tc) = config.toolchain {
             println!("  ── Toolchain ────────────────────────────────────────");
+            if !tc.prefix.is_empty() {
+                println!("    Prefix:           {}", tc.prefix);
+            }
             println!("    CPU:              {}", tc.cpu);
             if !tc.float_abi.is_empty() {
                 println!("    Float ABI:        {}", tc.float_abi);
@@ -391,6 +394,12 @@ impl UserQuery {
             }
             if !tc.extra_flags.is_empty() {
                 println!("    Extra flags:      {}", tc.extra_flags);
+            }
+            if let Some(ref sysroot) = tc.sysroot {
+                println!("    Sysroot:          {}", sysroot);
+            }
+            if !tc.find_root_path.is_empty() {
+                println!("    Find root paths:  {}", tc.find_root_path.join(" "));
             }
         }
         println!("  ────────────────────────────────────────────────────");
