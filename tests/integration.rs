@@ -471,7 +471,10 @@ fn test_cross_compile_template() {
         c_standard: "11".into(),
         cpp_standard: "17".into(),
         target_arch: fb_gen::models::project::TargetArch::NoneEabi,
-        mcu_flags: "cortex-m3".into(),
+        toolchain: Some(fb_gen::models::project::ToolchainConfig {
+            cpu: "cortex-m3".into(),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -568,6 +571,22 @@ fn test_cross_compile_template() {
         "toolchain.cmake should include --print-memory-usage"
     );
 
+    // ── FIND_ROOT_PATH_MODE ───────────────────────────────────────────
+    assert!(
+        toolchain_content.contains("CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER"),
+        "toolchain.cmake should set CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER"
+    );
+
+    // ── User block markers ────────────────────────────────────────────
+    assert!(
+        toolchain_content.contains("# USER_START"),
+        "toolchain.cmake should contain USER_START marker"
+    );
+    assert!(
+        toolchain_content.contains("# USER_END"),
+        "toolchain.cmake should contain USER_END marker"
+    );
+
     // ── Link libraries ───────────────────────────────────────────────
     assert!(
         toolchain_content.contains("TOOLCHAIN_LINK_LIBRARIES \"m\""),
@@ -584,52 +603,6 @@ fn test_cross_compile_template() {
     assert!(
         !root_content.contains("CMAKE_SYSTEM_NAME"),
         "root CMakeLists.txt should NOT contain CMAKE_SYSTEM_NAME (moved to toolchain.cmake)"
-    );
-}
-
-#[test]
-fn test_toolchain_arm64() {
-    // Verify ARM64 generates aarch64-none-elf- toolchain with cortex-a53.
-    let tmp = TempDir::new().unwrap();
-    create_test_project(&tmp);
-
-    let root = tmp.path().to_path_buf();
-    let sources = scan_project(&root);
-
-    let discoverer = ModuleDiscoverer::new(ScanOptions {
-        exclude_dirs: vec![],
-        root: root.clone(),
-    });
-    let modules = discoverer.discover(&sources).unwrap();
-
-    let config = ProjectConfig {
-        name: "ARM64Test".into(),
-        version: "0.1.0".into(),
-        root: root.clone(),
-        target_arch: fb_gen::models::project::TargetArch::ARM64,
-        mcu_flags: "cortex-a53".into(),
-        ..Default::default()
-    };
-
-    let generator = CMakeGenerator::new(&config).unwrap();
-    let empty_graph = DependencyGraph::new();
-    generator.generate(&modules, &empty_graph, true).unwrap();
-
-    let toolchain_path = root.join("cmake").join("toolchain.cmake");
-    assert!(toolchain_path.exists());
-
-    let content = std::fs::read_to_string(&toolchain_path).unwrap();
-    assert!(
-        content.contains("TOOLCHAIN_PREFIX aarch64-none-elf-"),
-        "ARM64 toolchain should use aarch64-none-elf- prefix"
-    );
-    assert!(
-        content.contains("-mcpu=cortex-a53"),
-        "ARM64 toolchain should use cortex-a53 MCU flags"
-    );
-    assert!(
-        content.contains("CMAKE_SYSTEM_PROCESSOR aarch64"),
-        "ARM64 toolchain should set processor to aarch64"
     );
 }
 
@@ -653,6 +626,7 @@ fn test_toolchain_riscv64() {
         version: "0.1.0".into(),
         root: root.clone(),
         target_arch: fb_gen::models::project::TargetArch::RISCV64,
+        toolchain: Some(fb_gen::models::project::ToolchainConfig::default()),
         ..Default::default()
     };
 
@@ -816,5 +790,166 @@ fn test_bare_include_no_self_dependency() {
         a_deps.is_empty(),
         "module 'a' should have no self-dependencies, got: {:?}",
         a_deps
+    );
+}
+
+#[test]
+fn test_toolchain_arm32_no_toolchain() {
+    // ARM32 should NOT generate a toolchain file (Linux userspace target).
+    let tmp = TempDir::new().unwrap();
+    create_test_project(&tmp);
+
+    let root = tmp.path().to_path_buf();
+    let sources = scan_project(&root);
+
+    let discoverer = ModuleDiscoverer::new(ScanOptions {
+        exclude_dirs: vec![],
+        root: root.clone(),
+    });
+    let modules = discoverer.discover(&sources).unwrap();
+
+    let config = ProjectConfig {
+        name: "ARM32Test".into(),
+        version: "0.1.0".into(),
+        root: root.clone(),
+        target_arch: fb_gen::models::project::TargetArch::ARM32,
+        ..Default::default()
+    };
+
+    let generator = CMakeGenerator::new(&config).unwrap();
+    let empty_graph = DependencyGraph::new();
+    generator.generate(&modules, &empty_graph, true).unwrap();
+
+    let toolchain_path = root.join("cmake").join("toolchain.cmake");
+    assert!(
+        !toolchain_path.exists(),
+        "toolchain.cmake should NOT be generated for ARM32 target"
+    );
+}
+
+#[test]
+fn test_toolchain_arm64_no_toolchain() {
+    // ARM64 should NOT generate a toolchain file.
+    let tmp = TempDir::new().unwrap();
+    create_test_project(&tmp);
+
+    let root = tmp.path().to_path_buf();
+    let sources = scan_project(&root);
+
+    let discoverer = ModuleDiscoverer::new(ScanOptions {
+        exclude_dirs: vec![],
+        root: root.clone(),
+    });
+    let modules = discoverer.discover(&sources).unwrap();
+
+    let config = ProjectConfig {
+        name: "ARM64Test".into(),
+        version: "0.1.0".into(),
+        root: root.clone(),
+        target_arch: fb_gen::models::project::TargetArch::ARM64,
+        ..Default::default()
+    };
+
+    let generator = CMakeGenerator::new(&config).unwrap();
+    let empty_graph = DependencyGraph::new();
+    generator.generate(&modules, &empty_graph, true).unwrap();
+
+    let toolchain_path = root.join("cmake").join("toolchain.cmake");
+    assert!(
+        !toolchain_path.exists(),
+        "toolchain.cmake should NOT be generated for ARM64 target"
+    );
+}
+
+#[test]
+fn test_toolchain_none_eabi_missing_cpu() {
+    // NoneEabi with empty CPU should return an error.
+    let tmp = TempDir::new().unwrap();
+    create_test_project(&tmp);
+
+    let root = tmp.path().to_path_buf();
+    let sources = scan_project(&root);
+
+    let discoverer = ModuleDiscoverer::new(ScanOptions {
+        exclude_dirs: vec![],
+        root: root.clone(),
+    });
+    let modules = discoverer.discover(&sources).unwrap();
+
+    let config = ProjectConfig {
+        name: "NoCpuTest".into(),
+        version: "0.1.0".into(),
+        root: root.clone(),
+        target_arch: fb_gen::models::project::TargetArch::NoneEabi,
+        toolchain: Some(fb_gen::models::project::ToolchainConfig {
+            cpu: String::new(), // missing!
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let generator = CMakeGenerator::new(&config).unwrap();
+    let empty_graph = DependencyGraph::new();
+    let result = generator.generate(&modules, &empty_graph, true);
+
+    assert!(
+        result.is_err(),
+        "NoneEabi with empty CPU should return an error, got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_toolchain_user_block_preservation() {
+    // Verify that user edits in # USER_START / # USER_END are preserved
+    // when the toolchain file is regenerated (non-force mode).
+    let tmp = TempDir::new().unwrap();
+    create_test_project(&tmp);
+
+    let root = tmp.path().to_path_buf();
+    let sources = scan_project(&root);
+
+    let discoverer = ModuleDiscoverer::new(ScanOptions {
+        exclude_dirs: vec![],
+        root: root.clone(),
+    });
+    let modules = discoverer.discover(&sources).unwrap();
+
+    let config = ProjectConfig {
+        name: "UserBlockTest".into(),
+        version: "0.1.0".into(),
+        root: root.clone(),
+        target_arch: fb_gen::models::project::TargetArch::NoneEabi,
+        toolchain: Some(fb_gen::models::project::ToolchainConfig {
+            cpu: "cortex-m4".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // First generation (force mode).
+    let generator = CMakeGenerator::new(&config).unwrap();
+    let empty_graph = DependencyGraph::new();
+    generator.generate(&modules, &empty_graph, true).unwrap();
+
+    let toolchain_path = root.join("cmake").join("toolchain.cmake");
+    assert!(toolchain_path.exists());
+
+    // Manually edit the toolchain file to add user content.
+    let original = std::fs::read_to_string(&toolchain_path).unwrap();
+    let edited = original.replace(
+        "# USER_START\n# USER_END",
+        "# USER_START\nset(CMAKE_C_FLAGS \"${CMAKE_C_FLAGS} -DMY_DEFINE\")\n# USER_END",
+    );
+    std::fs::write(&toolchain_path, &edited).unwrap();
+
+    // Regenerate (non-force / sync mode).
+    generator.generate(&modules, &empty_graph, false).unwrap();
+
+    let regenerated = std::fs::read_to_string(&toolchain_path).unwrap();
+    assert!(
+        regenerated.contains("set(CMAKE_C_FLAGS \"${CMAKE_C_FLAGS} -DMY_DEFINE\")"),
+        "user block should be preserved in toolchain.cmake, got:\n{}",
+        regenerated
     );
 }
