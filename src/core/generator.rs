@@ -15,7 +15,7 @@
 use crate::models::dependency::{DependencyGraph, DependencyType};
 use crate::models::error::{FbGenError, Result};
 use crate::models::module::CMakeModule;
-use crate::models::project::{ProjectConfig, TargetArch};
+use crate::models::project::{ProjectConfig, TargetArch, ToolchainConfig};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -434,35 +434,40 @@ impl CMakeGenerator {
     /// Render the toolchain.cmake content for cross-compilation targets.
     ///
     /// Returns `Ok(None)` if the target architecture does not require a toolchain
-    /// (X86_64, X86, WASM, or Custom).
+    /// (ARM32, ARM64, X86_64, X86, WASM, Custom) or no ToolchainConfig is set.
     ///
-    /// Returns `Err` if the architecture requires a toolchain but no MCU flags
-    /// have been configured — the user must specify the chip model.
+    /// Returns `Err` if NoneEabi has no ToolchainConfig or the CPU field is empty.
     fn render_toolchain(&self) -> Result<Option<String>> {
-        let mcu_flags = self.config.mcu_flags.as_str();
+        let tc = match &self.config.toolchain {
+            Some(tc) => tc,
+            None => {
+                // No toolchain config — only valid for non-embedded targets.
+                if matches!(&self.config.target_arch, TargetArch::NoneEabi) {
+                    return Err(FbGenError::Config(
+                        "Toolchain configuration is required for NoneEabi targets. \
+                         Run `fb-gen init` to configure."
+                            .into(),
+                    ));
+                }
+                return Ok(None);
+            }
+        };
 
-        // Embedded targets MUST have MCU flags specified.
-        let requires_mcu = matches!(
-            &self.config.target_arch,
-            TargetArch::NoneEabi | TargetArch::ARM32 | TargetArch::ARM64
-        );
-        if requires_mcu && mcu_flags.is_empty() {
+        // NoneEabi MUST have CPU specified.
+        if matches!(&self.config.target_arch, TargetArch::NoneEabi) && tc.cpu.is_empty() {
             return Err(FbGenError::Config(
-                "MCU/CPU flags are required for embedded targets. \
-                 Run `fb-gen init` to configure, or set mcu_flags in your config."
+                "MCU/CPU is required for NoneEabi targets. \
+                 Run `fb-gen init` to configure."
                     .into(),
             ));
         }
 
         match &self.config.target_arch {
-            TargetArch::NoneEabi | TargetArch::ARM32 => {
-                Ok(Some(render_arm_eabi_toolchain(mcu_flags)))
-            }
-            TargetArch::ARM64 => {
-                Ok(Some(render_aarch64_toolchain(mcu_flags)))
+            TargetArch::NoneEabi => {
+                Ok(Some(render_arm_eabi_toolchain(tc)))
             }
             TargetArch::RISCV64 => {
-                Ok(Some(render_riscv64_toolchain(mcu_flags)))
+                Ok(Some(render_riscv64_toolchain(tc)))
             }
             _ => Ok(None),
         }
@@ -573,35 +578,52 @@ impl CMakeGenerator {
 
 /// Render a complete toolchain.cmake for ARM Cortex-M bare-metal targets
 /// (arm-none-eabi-gcc).
-fn render_arm_eabi_toolchain(mcu_flags: &str) -> String {
+fn render_arm_eabi_toolchain(tc: &ToolchainConfig) -> String {
     let prefix = "arm-none-eabi-";
-    render_embedded_toolchain("Generic", "arm", prefix, mcu_flags)
+    render_embedded_toolchain("Generic", "arm", prefix, tc)
 }
 
-fn render_aarch64_toolchain(mcu_flags: &str) -> String {
+fn render_aarch64_toolchain(tc: &ToolchainConfig) -> String {
     let prefix = "aarch64-none-elf-";
-    render_embedded_toolchain("Generic", "aarch64", prefix, mcu_flags)
+    render_embedded_toolchain("Generic", "aarch64", prefix, tc)
 }
 
-fn render_riscv64_toolchain(mcu_flags: &str) -> String {
+fn render_riscv64_toolchain(tc: &ToolchainConfig) -> String {
     let prefix = "riscv64-unknown-elf-";
-    render_embedded_toolchain("Generic", "riscv64", prefix, mcu_flags)
+    render_embedded_toolchain("Generic", "riscv64", prefix, tc)
 }
 
 /// Shared template for embedded cross-compilation toolchain files.
 ///
 /// Produces a complete CMake toolchain file with compiler flags, linker options,
-/// and target-specific settings.
+/// target-specific settings, and a user-customisation block.
 fn render_embedded_toolchain(
     system_name: &str,
     processor: &str,
     prefix: &str,
-    mcu_flags: &str,
+    tc: &ToolchainConfig,
 ) -> String {
-    let mcu_flag_line = if mcu_flags.is_empty() {
-        String::new()
+    // Assemble TARGET_FLAGS from structured fields.
+    let mut flags: Vec<String> = Vec::new();
+    if !tc.cpu.is_empty() {
+        flags.push(format!("-mcpu={}", tc.cpu));
+    }
+    if !tc.float_abi.is_empty() {
+        flags.push(format!("-mfloat-abi={}", tc.float_abi));
+    }
+    if !tc.fpu.is_empty() {
+        flags.push(format!("-mfpu={}", tc.fpu));
+    }
+    if !tc.extra_flags.is_empty() {
+        flags.push(tc.extra_flags.clone());
+    }
+    let target_flags = flags.join(" ");
+
+    // Linker-script flag.
+    let ld_flag = if !tc.linker_script.is_empty() {
+        format!(" -T ${{CMAKE_SOURCE_DIR}}/{}", tc.linker_script)
     } else {
-        format!("-mcpu={}", mcu_flags)
+        String::new()
     };
 
     format!(
@@ -628,11 +650,17 @@ set(CMAKE_EXECUTABLE_SUFFIX_CXX ".elf")
 
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
+# ── Cross-compilation root paths ─────────────────────────────────
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+
 # MCU specific flags
-set(TARGET_FLAGS "{mcu_flag_line} ")
+set(TARGET_FLAGS "{target_flags} ")
 
 set(CMAKE_C_FLAGS "${{CMAKE_C_FLAGS}} ${{TARGET_FLAGS}}")
-set(CMAKE_ASM_FLAGS "${{CMAKE_C_FLAGS}} -x assembler-with-cpp -MMD -MP")
+set(CMAKE_ASM_FLAGS "${{CMAKE_ASM_FLAGS}} ${{TARGET_FLAGS}} -x assembler-with-cpp -MMD -MP")
 set(CMAKE_C_FLAGS "${{CMAKE_C_FLAGS}} -Wall -fdata-sections -ffunction-sections -fstack-usage")
 
 set(CMAKE_C_FLAGS_DEBUG "-O0 -g3")
@@ -646,12 +674,18 @@ set(CMAKE_EXE_LINKER_FLAGS "${{TARGET_FLAGS}}")
 set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} --specs=nano.specs")
 set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} -Wl,-Map=${{CMAKE_PROJECT_NAME}}.map -Wl,--gc-sections")
 set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} -Wl,--print-memory-usage")
+set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}}{ld_flag}")
 set(TOOLCHAIN_LINK_LIBRARIES "m")
+
+# ── User customisations ──────────────────────────────────────────
+# USER_START
+# USER_END
 "#,
         system_name = system_name,
         processor = processor,
         prefix = prefix,
-        mcu_flag_line = mcu_flag_line,
+        target_flags = target_flags,
+        ld_flag = ld_flag,
     )
 }
 
