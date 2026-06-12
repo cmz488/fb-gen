@@ -151,6 +151,70 @@ target_link_options({{ target_name }} PRIVATE -T "${CMAKE_CURRENT_SOURCE_DIR}/{{
 # USER_END
 "#;
 
+/// `cmake/toolchain.cmake` template for embedded cross-compilation.
+const TOOLCHAIN_TEMPLATE: &str = r#"# Auto-generated toolchain file by fb-gen
+
+set(CMAKE_SYSTEM_NAME               {{ system_name }})
+set(CMAKE_SYSTEM_PROCESSOR          {{ processor }})
+
+set(CMAKE_C_COMPILER_ID GNU)
+set(CMAKE_CXX_COMPILER_ID GNU)
+
+# Some default GCC settings
+# {{ prefix }} must be part of path environment
+set(TOOLCHAIN_PREFIX                {{ prefix }})
+
+set(CMAKE_C_COMPILER                ${TOOLCHAIN_PREFIX}gcc)
+set(CMAKE_ASM_COMPILER              ${CMAKE_C_COMPILER})
+set(CMAKE_CXX_COMPILER              ${TOOLCHAIN_PREFIX}g++)
+set(CMAKE_LINKER                    ${TOOLCHAIN_PREFIX}g++)
+set(CMAKE_OBJCOPY                   ${TOOLCHAIN_PREFIX}objcopy)
+set(CMAKE_SIZE                      ${TOOLCHAIN_PREFIX}size)
+
+set(CMAKE_EXECUTABLE_SUFFIX_ASM     ".elf")
+set(CMAKE_EXECUTABLE_SUFFIX_C       ".elf")
+set(CMAKE_EXECUTABLE_SUFFIX_CXX     ".elf")
+
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+
+# ── Sysroot (auto-detected) ──────────────────────────────────
+{% if sysroot -%}
+set(CMAKE_SYSROOT {{ sysroot }})
+set(CMAKE_FIND_ROOT_PATH ${CMAKE_SYSROOT}{% for p in find_root_path %} {{ p }}{% endfor %})
+{% endif -%}
+
+# ── Cross-compilation root paths ─────────────────────────────
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+
+# MCU specific flags
+set(TARGET_FLAGS "{{ target_flags }} ")
+
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${TARGET_FLAGS}")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -fdata-sections -ffunction-sections -fstack-usage")
+set(CMAKE_ASM_FLAGS "${CMAKE_C_FLAGS} -x assembler-with-cpp -MMD -MP")
+
+set(CMAKE_C_FLAGS_DEBUG "-O0 -g3")
+set(CMAKE_C_FLAGS_RELEASE "-Os -g0")
+set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g3")
+set(CMAKE_CXX_FLAGS_RELEASE "-Os -g0")
+
+set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -fno-rtti -fno-exceptions -fno-threadsafe-statics")
+
+set(CMAKE_EXE_LINKER_FLAGS "${TARGET_FLAGS}")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}{{ ld_flag }}")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --specs=nano.specs")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-Map=${CMAKE_PROJECT_NAME}.map -Wl,--gc-sections")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--print-memory-usage")
+set(TOOLCHAIN_LINK_LIBRARIES "m")
+
+# ── User customisations ──────────────────────────────────────────
+# USER_START
+# USER_END
+"#;
+
 // ── Generator ──────────────────────────────────────────────────────────────
 
 /// Generates CMakeLists.txt files from modules and dependency information.
@@ -168,6 +232,8 @@ impl CMakeGenerator {
         tera.add_raw_template("root", ROOT_TEMPLATE)
             .map_err(FbGenError::Template)?;
         tera.add_raw_template("module", MODULE_TEMPLATE)
+            .map_err(FbGenError::Template)?;
+        tera.add_raw_template("toolchain", TOOLCHAIN_TEMPLATE)
             .map_err(FbGenError::Template)?;
 
         Ok(Self {
@@ -500,8 +566,22 @@ impl CMakeGenerator {
         }
 
         match &self.config.target_arch {
-            TargetArch::NoneEabi => Ok(Some(render_arm_eabi_toolchain(tc, root_ld_scripts))),
-            TargetArch::RISCV64 => Ok(Some(render_riscv64_toolchain(tc, root_ld_scripts))),
+            TargetArch::NoneEabi => Ok(Some(self.render_arm_eabi_toolchain(tc, root_ld_scripts)?)),
+            TargetArch::ARM32 => {
+                if tc.prefix.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(self.render_embedded_toolchain("Linux", "arm", &tc.prefix, tc, root_ld_scripts)?))
+                }
+            }
+            TargetArch::ARM64 => {
+                if tc.prefix.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(self.render_embedded_toolchain("Linux", "aarch64", &tc.prefix, tc, root_ld_scripts)?))
+                }
+            }
+            TargetArch::RISCV64 => Ok(Some(self.render_riscv64_toolchain(tc, root_ld_scripts)?)),
             _ => Ok(None),
         }
     }
@@ -578,6 +658,65 @@ impl CMakeGenerator {
         } else {
             root.join(p)
         }
+    }
+
+    // ── Toolchain rendering methods ─────────────────────────────────────
+
+    /// Render a complete toolchain.cmake for ARM Cortex-M bare-metal targets
+    /// (arm-none-eabi-gcc).
+    fn render_arm_eabi_toolchain(&self, tc: &ToolchainConfig, root_ld_scripts: &[String]) -> FbGenResult<String> {
+        let prefix = if tc.prefix.is_empty() { "arm-none-eabi-" } else { &tc.prefix };
+        self.render_embedded_toolchain("Generic", "arm", prefix, tc, root_ld_scripts)
+    }
+
+    fn render_riscv64_toolchain(&self, tc: &ToolchainConfig, root_ld_scripts: &[String]) -> FbGenResult<String> {
+        let prefix = if tc.prefix.is_empty() { "riscv64-unknown-elf-" } else { &tc.prefix };
+        self.render_embedded_toolchain("Generic", "riscv64", prefix, tc, root_ld_scripts)
+    }
+
+    /// Render a complete CMake toolchain file using Tera templating.
+    fn render_embedded_toolchain(
+        &self,
+        system_name: &str,
+        processor: &str,
+        prefix: &str,
+        tc: &ToolchainConfig,
+        root_ld_scripts: &[String],
+    ) -> FbGenResult<String> {
+        // Assemble TARGET_FLAGS from structured fields.
+        let mut flags: Vec<String> = Vec::new();
+        if !tc.cpu.is_empty() {
+            flags.push(format!("-mcpu={}", tc.cpu));
+        }
+        if !tc.float_abi.is_empty() {
+            flags.push(format!("-mfloat-abi={}", tc.float_abi));
+        }
+        if !tc.fpu.is_empty() {
+            flags.push(format!("-mfpu={}", tc.fpu));
+        }
+        if !tc.extra_flags.is_empty() {
+            flags.push(tc.extra_flags.clone());
+        }
+        let target_flags = flags.join(" ");
+
+        let ld_flag = if root_ld_scripts.len() == 1 {
+            format!(" -T \"${{CMAKE_SOURCE_DIR}}/{}\"", root_ld_scripts[0])
+        } else {
+            String::new()
+        };
+
+        let mut ctx = Context::new();
+        ctx.insert("system_name", system_name);
+        ctx.insert("processor", processor);
+        ctx.insert("prefix", prefix);
+        ctx.insert("target_flags", &target_flags);
+        ctx.insert("ld_flag", &ld_flag);
+        ctx.insert("sysroot", &tc.sysroot);
+        ctx.insert("find_root_path", &tc.find_root_path);
+
+        self.tera
+            .render("toolchain", &ctx)
+            .map_err(FbGenError::Template)
     }
 
     // ── Path helpers ─────────────────────────────────────────────────────
@@ -697,19 +836,6 @@ impl CMakeGenerator {
     }
 }
 
-// ── Toolchain file renderers ────────────────────────────────────────────────
-
-/// Render a complete toolchain.cmake for ARM Cortex-M bare-metal targets
-/// (arm-none-eabi-gcc).
-fn render_arm_eabi_toolchain(tc: &ToolchainConfig, root_ld_scripts: &[String]) -> String {
-    let prefix = "arm-none-eabi-";
-    render_embedded_toolchain("Generic", "arm", prefix, tc, root_ld_scripts)
-}
-
-fn render_riscv64_toolchain(tc: &ToolchainConfig, root_ld_scripts: &[String]) -> String {
-    let prefix = "riscv64-unknown-elf-";
-    render_embedded_toolchain("Generic", "riscv64", prefix, tc, root_ld_scripts)
-}
 
 /// Scan the project root (non-recursive) for `.ld` linker scripts.
 ///
@@ -735,104 +861,6 @@ fn detect_linker_scripts(root: &Path) -> Vec<String> {
         }
     }
     if found.len() == 1 { found } else { Vec::new() }
-}
-
-/// Shared template for embedded cross-compilation toolchain files.
-///
-/// Produces a complete CMake toolchain file with compiler flags, linker options,
-/// target-specific settings, and a user-customisation block.
-fn render_embedded_toolchain(
-    system_name: &str,
-    processor: &str,
-    prefix: &str,
-    tc: &ToolchainConfig,
-    root_ld_scripts: &[String],
-) -> String {
-    // Assemble TARGET_FLAGS from structured fields.
-    let mut flags: Vec<String> = Vec::new();
-    if !tc.cpu.is_empty() {
-        flags.push(format!("-mcpu={}", tc.cpu));
-    }
-    if !tc.float_abi.is_empty() {
-        flags.push(format!("-mfloat-abi={}", tc.float_abi));
-    }
-    if !tc.fpu.is_empty() {
-        flags.push(format!("-mfpu={}", tc.fpu));
-    }
-    if !tc.extra_flags.is_empty() {
-        flags.push(tc.extra_flags.clone());
-    }
-    let target_flags = flags.join(" ");
-
-    let ld_flag = if root_ld_scripts.len() == 1 {
-        format!(" -T \"${{CMAKE_SOURCE_DIR}}/{}\"", root_ld_scripts[0])
-    } else {
-        String::new()
-    };
-
-    format!(
-        r#"# Auto-generated toolchain file by fb-gen
-
-set(CMAKE_SYSTEM_NAME               {system_name})
-set(CMAKE_SYSTEM_PROCESSOR          {processor})
-
-set(CMAKE_C_COMPILER_ID GNU)
-set(CMAKE_CXX_COMPILER_ID GNU)
-
-# Some default GCC settings
-# {prefix} must be part of path environment
-set(TOOLCHAIN_PREFIX                {prefix})
-
-set(CMAKE_C_COMPILER                ${{TOOLCHAIN_PREFIX}}gcc)
-set(CMAKE_ASM_COMPILER              ${{CMAKE_C_COMPILER}})
-set(CMAKE_CXX_COMPILER              ${{TOOLCHAIN_PREFIX}}g++)
-set(CMAKE_LINKER                    ${{TOOLCHAIN_PREFIX}}g++)
-set(CMAKE_OBJCOPY                   ${{TOOLCHAIN_PREFIX}}objcopy)
-set(CMAKE_SIZE                      ${{TOOLCHAIN_PREFIX}}size)
-
-set(CMAKE_EXECUTABLE_SUFFIX_ASM     ".elf")
-set(CMAKE_EXECUTABLE_SUFFIX_C       ".elf")
-set(CMAKE_EXECUTABLE_SUFFIX_CXX     ".elf")
-
-set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
-
-# ── Cross-compilation root paths ─────────────────────────────────
-set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-
-# MCU specific flags
-set(TARGET_FLAGS "{target_flags} ")
-
-set(CMAKE_C_FLAGS "${{CMAKE_C_FLAGS}} ${{TARGET_FLAGS}}")
-set(CMAKE_C_FLAGS "${{CMAKE_C_FLAGS}} -Wall -fdata-sections -ffunction-sections -fstack-usage")
-set(CMAKE_ASM_FLAGS "${{CMAKE_C_FLAGS}} -x assembler-with-cpp -MMD -MP")
-
-set(CMAKE_C_FLAGS_DEBUG "-O0 -g3")
-set(CMAKE_C_FLAGS_RELEASE "-Os -g0")
-set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g3")
-set(CMAKE_CXX_FLAGS_RELEASE "-Os -g0")
-
-set(CMAKE_CXX_FLAGS "${{CMAKE_C_FLAGS}} -fno-rtti -fno-exceptions -fno-threadsafe-statics")
-
-set(CMAKE_EXE_LINKER_FLAGS "${{TARGET_FLAGS}}")
-set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}}{ld_flag}")
-set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} --specs=nano.specs")
-set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} -Wl,-Map=${{CMAKE_PROJECT_NAME}}.map -Wl,--gc-sections")
-set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} -Wl,--print-memory-usage")
-set(TOOLCHAIN_LINK_LIBRARIES "m")
-
-# ── User customisations ──────────────────────────────────────────
-# USER_START
-# USER_END
-"#,
-        system_name = system_name,
-        processor = processor,
-        prefix = prefix,
-        target_flags = target_flags,
-        ld_flag = ld_flag,
-    )
 }
 
 // ── Cross-compilation helpers ──────────────────────────────────────────────
