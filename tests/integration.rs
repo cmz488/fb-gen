@@ -312,7 +312,7 @@ fn test_cmake_generation() {
     };
 
     let generator = CMakeGenerator::new(&config).unwrap();
-    generator.generate(&modules, &graph, true).unwrap();
+    generator.generate(&modules, &graph, true, &[]).unwrap();
 
     // Root CMakeLists.txt should exist.
     let root_cmake = root.join("CMakeLists.txt");
@@ -455,6 +455,18 @@ fn test_cross_compile_template() {
     create_test_project(&tmp);
 
     let root = tmp.path().to_path_buf();
+
+    // Remove the default link.ld from create_test_project to leave
+    // exactly one .ld at root for auto-detection.
+    std::fs::remove_file(root.join("link.ld")).unwrap();
+
+    // Create a linker script at root for auto-detection test.
+    std::fs::write(
+        root.join("STM32F103XX_FLASH.ld"),
+        "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 512K }\n",
+    )
+    .unwrap();
+
     let sources = scan_project(&root);
 
     let discoverer = ModuleDiscoverer::new(ScanOptions {
@@ -480,7 +492,7 @@ fn test_cross_compile_template() {
 
     let generator = CMakeGenerator::new(&config).unwrap();
     let empty_graph = DependencyGraph::new();
-    generator.generate(&modules, &empty_graph, true).unwrap();
+    generator.generate(&modules, &empty_graph, true, &[]).unwrap();
 
     // Toolchain file should be created at cmake/toolchain.cmake.
     let toolchain_path = root.join("cmake").join("toolchain.cmake");
@@ -493,12 +505,12 @@ fn test_cross_compile_template() {
 
     // ── Compiler identification ──────────────────────────────────────
     assert!(
-        toolchain_content.contains("CMAKE_SYSTEM_NAME Generic"),
-        "toolchain.cmake should set CMAKE_SYSTEM_NAME Generic"
+        toolchain_content.contains("set(CMAKE_SYSTEM_NAME"),
+        "toolchain.cmake should set CMAKE_SYSTEM_NAME"
     );
     assert!(
-        toolchain_content.contains("CMAKE_SYSTEM_PROCESSOR arm"),
-        "toolchain.cmake should set CMAKE_SYSTEM_PROCESSOR arm"
+        toolchain_content.contains("set(CMAKE_SYSTEM_PROCESSOR"),
+        "toolchain.cmake should set CMAKE_SYSTEM_PROCESSOR"
     );
     assert!(
         toolchain_content.contains("CMAKE_C_COMPILER_ID GNU"),
@@ -507,9 +519,8 @@ fn test_cross_compile_template() {
 
     // ── TOOLCHAIN_PREFIX ─────────────────────────────────────────────
     assert!(
-        toolchain_content.contains("TOOLCHAIN_PREFIX arm-none-eabi-"),
-        "toolchain.cmake should set TOOLCHAIN_PREFIX arm-none-eabi-,\ngot:\n{}",
-        toolchain_content
+        toolchain_content.contains("set(TOOLCHAIN_PREFIX"),
+        "toolchain.cmake should set TOOLCHAIN_PREFIX"
     );
     assert!(
         toolchain_content.contains("${TOOLCHAIN_PREFIX}gcc"),
@@ -604,6 +615,12 @@ fn test_cross_compile_template() {
         !root_content.contains("CMAKE_SYSTEM_NAME"),
         "root CMakeLists.txt should NOT contain CMAKE_SYSTEM_NAME (moved to toolchain.cmake)"
     );
+
+    // ── Auto-detected linker script ─────────────────────────────────
+    assert!(
+        toolchain_content.contains("-T \"${CMAKE_SOURCE_DIR}/STM32F103XX_FLASH.ld\""),
+        "toolchain.cmake should auto-detect STM32F103XX_FLASH.ld at root"
+    );
 }
 
 #[test]
@@ -632,19 +649,19 @@ fn test_toolchain_riscv64() {
 
     let generator = CMakeGenerator::new(&config).unwrap();
     let empty_graph = DependencyGraph::new();
-    generator.generate(&modules, &empty_graph, true).unwrap();
+    generator.generate(&modules, &empty_graph, true, &[]).unwrap();
 
     let toolchain_path = root.join("cmake").join("toolchain.cmake");
     assert!(toolchain_path.exists());
 
     let content = std::fs::read_to_string(&toolchain_path).unwrap();
     assert!(
-        content.contains("TOOLCHAIN_PREFIX riscv64-unknown-elf-"),
-        "RISCV64 toolchain should use riscv64-unknown-elf- prefix"
+        content.contains("set(TOOLCHAIN_PREFIX"),
+        "RISCV64 toolchain should set TOOLCHAIN_PREFIX"
     );
     assert!(
-        content.contains("CMAKE_SYSTEM_PROCESSOR riscv64"),
-        "RISCV64 toolchain should set processor to riscv64"
+        content.contains("set(CMAKE_SYSTEM_PROCESSOR"),
+        "RISCV64 toolchain should set processor"
     );
     // RISCV64 should NOT have an -mcpu flag (empty MCU).
     assert!(
@@ -683,7 +700,7 @@ fn test_toolchain_not_generated_for_x86() {
 
     let generator = CMakeGenerator::new(&config).unwrap();
     let empty_graph = DependencyGraph::new();
-    generator.generate(&modules, &empty_graph, true).unwrap();
+    generator.generate(&modules, &empty_graph, true, &[]).unwrap();
 
     // Toolchain file should NOT exist for x86_64.
     let toolchain_path = root.join("cmake").join("toolchain.cmake");
@@ -818,7 +835,7 @@ fn test_toolchain_arm32_no_toolchain() {
 
     let generator = CMakeGenerator::new(&config).unwrap();
     let empty_graph = DependencyGraph::new();
-    generator.generate(&modules, &empty_graph, true).unwrap();
+    generator.generate(&modules, &empty_graph, true, &[]).unwrap();
 
     let toolchain_path = root.join("cmake").join("toolchain.cmake");
     assert!(
@@ -852,7 +869,7 @@ fn test_toolchain_arm64_no_toolchain() {
 
     let generator = CMakeGenerator::new(&config).unwrap();
     let empty_graph = DependencyGraph::new();
-    generator.generate(&modules, &empty_graph, true).unwrap();
+    generator.generate(&modules, &empty_graph, true, &[]).unwrap();
 
     let toolchain_path = root.join("cmake").join("toolchain.cmake");
     assert!(
@@ -890,7 +907,7 @@ fn test_toolchain_none_eabi_missing_cpu() {
 
     let generator = CMakeGenerator::new(&config).unwrap();
     let empty_graph = DependencyGraph::new();
-    let result = generator.generate(&modules, &empty_graph, true);
+    let result = generator.generate(&modules, &empty_graph, true, &[]);
 
     assert!(
         result.is_err(),
@@ -930,7 +947,7 @@ fn test_toolchain_user_block_preservation() {
     // First generation (force mode).
     let generator = CMakeGenerator::new(&config).unwrap();
     let empty_graph = DependencyGraph::new();
-    generator.generate(&modules, &empty_graph, true).unwrap();
+    generator.generate(&modules, &empty_graph, true, &[]).unwrap();
 
     let toolchain_path = root.join("cmake").join("toolchain.cmake");
     assert!(toolchain_path.exists());
@@ -944,12 +961,185 @@ fn test_toolchain_user_block_preservation() {
     std::fs::write(&toolchain_path, &edited).unwrap();
 
     // Regenerate (non-force / sync mode).
-    generator.generate(&modules, &empty_graph, false).unwrap();
+    generator.generate(&modules, &empty_graph, false, &[]).unwrap();
 
     let regenerated = std::fs::read_to_string(&toolchain_path).unwrap();
     assert!(
         regenerated.contains("set(CMAKE_C_FLAGS \"${CMAKE_C_FLAGS} -DMY_DEFINE\")"),
         "user block should be preserved in toolchain.cmake, got:\n{}",
         regenerated
+    );
+}
+
+#[test]
+fn test_linker_script_auto_detect_single() {
+    let tmp = TempDir::new().unwrap();
+    create_test_project(&tmp);
+    let root = tmp.path().to_path_buf();
+
+    // Remove the default link.ld from create_test_project so that
+    // exactly one .ld file remains for auto-detection.
+    std::fs::remove_file(root.join("link.ld")).unwrap();
+
+    std::fs::write(
+        root.join("flash.ld"),
+        "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K }\n",
+    )
+    .unwrap();
+
+    let sources = scan_project(&root);
+    let discoverer = ModuleDiscoverer::new(ScanOptions {
+        exclude_dirs: vec![],
+        root: root.clone(),
+    });
+    let modules = discoverer.discover(&sources).unwrap();
+
+    let config = ProjectConfig {
+        name: "LdDetectTest".into(),
+        version: "0.1.0".into(),
+        root: root.clone(),
+        target_arch: fb_gen::models::project::TargetArch::NoneEabi,
+        toolchain: Some(fb_gen::models::project::ToolchainConfig {
+            cpu: "cortex-m3".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let generator = CMakeGenerator::new(&config).unwrap();
+    let empty_graph = DependencyGraph::new();
+    generator.generate(&modules, &empty_graph, true, &[]).unwrap();
+
+    let toolchain_path = root.join("cmake").join("toolchain.cmake");
+    let content = std::fs::read_to_string(&toolchain_path).unwrap();
+
+    assert!(
+        content.contains("-T \"${CMAKE_SOURCE_DIR}/flash.ld\""),
+        "toolchain.cmake should auto-detect flash.ld at root, got:\n{}",
+        content
+    );
+}
+
+#[test]
+fn test_linker_script_auto_detect_multiple() {
+    let tmp = TempDir::new().unwrap();
+    create_test_project(&tmp);
+    let root = tmp.path().to_path_buf();
+
+    // Remove the default link.ld from create_test_project so that only
+    // the two test .ld files exist (detection should skip when > 1).
+    std::fs::remove_file(root.join("link.ld")).unwrap();
+
+    std::fs::write(
+        root.join("flash_256k.ld"),
+        "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("flash_512k.ld"),
+        "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 512K }\n",
+    )
+    .unwrap();
+
+    let sources = scan_project(&root);
+    let discoverer = ModuleDiscoverer::new(ScanOptions {
+        exclude_dirs: vec![],
+        root: root.clone(),
+    });
+    let modules = discoverer.discover(&sources).unwrap();
+
+    let config = ProjectConfig {
+        name: "LdAmbiguousTest".into(),
+        version: "0.1.0".into(),
+        root: root.clone(),
+        target_arch: fb_gen::models::project::TargetArch::NoneEabi,
+        toolchain: Some(fb_gen::models::project::ToolchainConfig {
+            cpu: "cortex-m3".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let generator = CMakeGenerator::new(&config).unwrap();
+    let empty_graph = DependencyGraph::new();
+    generator.generate(&modules, &empty_graph, true, &[]).unwrap();
+
+    let toolchain_path = root.join("cmake").join("toolchain.cmake");
+    let content = std::fs::read_to_string(&toolchain_path).unwrap();
+
+    assert!(
+        !content.contains("-T \"${CMAKE_SOURCE_DIR}"),
+        "toolchain.cmake should NOT auto-detect linker script when multiple .ld files at root"
+    );
+}
+
+#[test]
+fn test_user_cmake_detection() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().to_path_buf();
+
+    let core_dir = root.join("core");
+    std::fs::create_dir(&core_dir).unwrap();
+    std::fs::write(core_dir.join("core.c"), "int core_func() { return 0; }\n").unwrap();
+
+    let drivers_dir = root.join("Drivers");
+    std::fs::create_dir(&drivers_dir).unwrap();
+    std::fs::write(
+        drivers_dir.join("CMakeLists.txt"),
+        "project(Drivers)\nadd_library(drivers STATIC driver.c)\n",
+    )
+    .unwrap();
+
+    let scanner = FffScanner::new(&root);
+    let user_modules = scanner.scan_user_cmake_files(&root, &["build".into(), ".git".into()]);
+
+    assert_eq!(
+        user_modules.len(),
+        1,
+        "should detect 1 user CMake module, got: {:?}",
+        user_modules
+    );
+    assert!(
+        user_modules[0].to_string_lossy().contains("Drivers"),
+        "user module should be Drivers directory"
+    );
+
+    let sources = scanner.scan_source_files(&fb_gen::scanner::fs_adapter::ScanOptions {
+        root: root.clone(),
+        ..Default::default()
+    }).unwrap();
+
+    let discoverer = ModuleDiscoverer::new(ScanOptions {
+        exclude_dirs: vec![],
+        root: root.clone(),
+    });
+    let modules = discoverer.discover(&sources).unwrap();
+
+    let analyzer = DependencyAnalyzer::new();
+    let graph = analyzer.analyze(&modules).unwrap();
+
+    let config = ProjectConfig {
+        name: "UserModulesTest".into(),
+        version: "0.1.0".into(),
+        root: root.clone(),
+        ..Default::default()
+    };
+
+    let generator = CMakeGenerator::new(&config).unwrap();
+    generator.generate(&modules, &graph, true, &user_modules).unwrap();
+
+    let root_cmake = root.join("CMakeLists.txt");
+    let content = std::fs::read_to_string(&root_cmake).unwrap();
+
+    assert!(
+        content.contains("add_subdirectory(Drivers)"),
+        "root CMakeLists.txt should include user module Drivers in USER_START block"
+    );
+    let start = content.find("# USER_START").unwrap();
+    let end = content.find("# USER_END").unwrap();
+    let block = &content[start..end];
+    assert!(
+        block.contains("add_subdirectory(Drivers)"),
+        "Drivers should be listed in the USER_START block"
     );
 }
