@@ -121,6 +121,36 @@ impl UserQuery {
                 .filter(|dt| dt.suggested_arch == target_arch)
                 .collect();
 
+            let ask_mcu_cpu = || -> FbGenResult<(String, String, String, String)> {
+                if matches!(target_arch, TargetArch::NoneEabi) {
+                    println!();
+                    println!("  ARM MCU/CPU selection:");
+                    println!("    Specify the target chip model for -mcpu= flag.");
+                    let cpu = prompt_with_default("  ARM MCU/CPU [cortex-m3]", "cortex-m3")
+                        .map_err(|e| {
+                            crate::models::FbGenError::Config(format!("failed to read MCU: {e}"))
+                        })?;
+                    let float_abi = prompt_with_default(
+                        "  Float ABI (soft/softfp/hard, empty to skip) []", ""
+                    ).map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read float ABI: {e}"))
+                    })?;
+                    let fpu = prompt_with_default(
+                        "  FPU (e.g. fpv4-sp-d16, empty to skip) []", ""
+                    ).map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read FPU: {e}"))
+                    })?;
+                    let extra_flags = prompt_with_default(
+                        "  Extra flags (e.g. -mthumb, empty to skip) []", ""
+                    ).map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read extra flags: {e}"))
+                    })?;
+                    Ok((cpu, float_abi, fpu, extra_flags))
+                } else {
+                    Ok((String::new(), String::new(), String::new(), String::new()))
+                }
+            };
+
             if compatible.is_empty() {
                 println!();
                 println!("  No compatible toolchain auto-detected for {:?}.", target_arch);
@@ -157,34 +187,7 @@ impl UserQuery {
                     .map(String::from)
                     .collect();
 
-                // MCU/CPU prompts for NoneEabi only.
-                let (cpu, float_abi, fpu, extra_flags) = if matches!(target_arch, TargetArch::NoneEabi) {
-                    println!();
-                    println!("  ARM MCU/CPU selection:");
-                    println!("    Specify the target chip model for -mcpu= flag.");
-                    let cpu = prompt_with_default("  ARM MCU/CPU [cortex-m3]", "cortex-m3")
-                        .map_err(|e| {
-                            crate::models::FbGenError::Config(format!("failed to read MCU: {e}"))
-                        })?;
-                    let float_abi = prompt_with_default(
-                        "  Float ABI (soft/softfp/hard, empty to skip) []", ""
-                    ).map_err(|e| {
-                        crate::models::FbGenError::Config(format!("failed to read float ABI: {e}"))
-                    })?;
-                    let fpu = prompt_with_default(
-                        "  FPU (e.g. fpv4-sp-d16, empty to skip) []", ""
-                    ).map_err(|e| {
-                        crate::models::FbGenError::Config(format!("failed to read FPU: {e}"))
-                    })?;
-                    let extra_flags = prompt_with_default(
-                        "  Extra flags (e.g. -mthumb, empty to skip) []", ""
-                    ).map_err(|e| {
-                        crate::models::FbGenError::Config(format!("failed to read extra flags: {e}"))
-                    })?;
-                    (cpu, float_abi, fpu, extra_flags)
-                } else {
-                    (String::new(), String::new(), String::new(), String::new())
-                };
+                let (cpu, float_abi, fpu, extra_flags) = ask_mcu_cpu()?;
 
                 toolchain = Some(crate::models::project::ToolchainConfig {
                     cpu,
@@ -217,14 +220,28 @@ impl UserQuery {
                 let (prefix, sysroot, find_root_path) = if let Ok(idx) = choice.parse::<usize>() {
                     if idx >= 1 && idx <= compatible.len() {
                         let dt = &compatible[idx - 1];
-                        (
-                            dt.prefix.clone(),
-                            dt.sysroot.clone().map(|p| p.to_string_lossy().to_string()),
-                            Vec::new(),
-                        )
+                        let prefix = dt.prefix.clone();
+                        let sysroot = dt.sysroot.clone().map(|p| p.to_string_lossy().to_string());
+                        let find_root_str = prompt_with_default(
+                            "  Extra CMAKE_FIND_ROOT_PATH entries (space-separated, empty to skip) []", ""
+                        ).map_err(|e| {
+                            crate::models::FbGenError::Config(format!("failed to read find root path: {e}"))
+                        })?;
+                        let find_root_path: Vec<String> = find_root_str
+                            .split_whitespace()
+                            .map(String::from)
+                            .collect();
+                        (prefix, sysroot, find_root_path)
                     } else {
                         // Custom entry.
-                        let prefix = prompt_with_default("  Toolchain prefix", "arm-none-eabi-")
+                        let default_prefix = match target_arch {
+                            TargetArch::NoneEabi => "arm-none-eabi-",
+                            TargetArch::ARM32 => "arm-linux-gnueabihf-",
+                            TargetArch::ARM64 => "aarch64-none-elf-",
+                            TargetArch::RISCV64 => "riscv64-unknown-elf-",
+                            _ => "arm-none-eabi-",
+                        };
+                        let prefix = prompt_with_default("  Toolchain prefix", default_prefix)
                             .map_err(|e| {
                                 crate::models::FbGenError::Config(format!("failed to read prefix: {e}"))
                             })?;
@@ -249,32 +266,7 @@ impl UserQuery {
                     ("arm-none-eabi-".into(), None, Vec::new())
                 };
 
-                // MCU/CPU prompts for NoneEabi (even when auto-detected).
-                let (cpu, float_abi, fpu, extra_flags) = if matches!(target_arch, TargetArch::NoneEabi) {
-                    println!();
-                    println!("  ARM MCU/CPU selection:");
-                    let cpu = prompt_with_default("  ARM MCU/CPU [cortex-m3]", "cortex-m3")
-                        .map_err(|e| {
-                            crate::models::FbGenError::Config(format!("failed to read MCU: {e}"))
-                        })?;
-                    let float_abi = prompt_with_default(
-                        "  Float ABI (soft/softfp/hard, empty to skip) []", ""
-                    ).map_err(|e| {
-                        crate::models::FbGenError::Config(format!("failed to read float ABI: {e}"))
-                    })?;
-                    let fpu = prompt_with_default(
-                        "  FPU (e.g. fpv4-sp-d16, empty to skip) []", ""
-                    ).map_err(|e| {
-                        crate::models::FbGenError::Config(format!("failed to read FPU: {e}"))
-                    })?;
-                    let extra_flags = prompt_with_default("  Extra flags (e.g. -mthumb) []", "")
-                        .map_err(|e| {
-                            crate::models::FbGenError::Config(format!("failed to read extra flags: {e}"))
-                        })?;
-                    (cpu, float_abi, fpu, extra_flags)
-                } else {
-                    (String::new(), String::new(), String::new(), String::new())
-                };
+                let (cpu, float_abi, fpu, extra_flags) = ask_mcu_cpu()?;
 
                 toolchain = Some(crate::models::project::ToolchainConfig {
                     cpu,
