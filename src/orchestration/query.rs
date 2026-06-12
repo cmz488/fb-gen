@@ -109,26 +109,60 @@ impl UserQuery {
             _ => TargetArch::X86_64,
         };
 
-        // ── MCU/CPU flags (ARM embedded targets only) ───────────────
-        let mcu_flags = if matches!(target_arch, TargetArch::NoneEabi | TargetArch::ARM32 | TargetArch::ARM64) {
-            let default_mcu = if matches!(target_arch, TargetArch::ARM64) {
-                "cortex-a53"
-            } else {
-                "cortex-m3"
-            };
+        // ── Toolchain config (NoneEabi bare-metal targets only) ────
+        let toolchain = if matches!(target_arch, TargetArch::NoneEabi) {
             println!();
             println!("  ARM MCU/CPU selection:");
             println!("    Specify the target chip model for -mcpu= flag.");
-            println!("    Examples: cortex-m0, cortex-m3, cortex-m4, cortex-m7, cortex-a53, cortex-a72");
-            prompt_with_default(
-                &format!("  ARM MCU/CPU [{}]", default_mcu),
-                default_mcu,
+            let cpu = prompt_with_default(
+                "  ARM MCU/CPU [cortex-m3]",
+                "cortex-m3",
             )
             .map_err(|e| {
-                crate::models::FbGenError::Config(format!("failed to read MCU flags: {e}"))
-            })?
+                crate::models::FbGenError::Config(format!("failed to read MCU: {e}"))
+            })?;
+
+            let float_abi = prompt_with_default(
+                "  Float ABI (soft/softfp/hard, empty to skip) []",
+                "",
+            )
+            .map_err(|e| {
+                crate::models::FbGenError::Config(format!("failed to read float ABI: {e}"))
+            })?;
+
+            let fpu = prompt_with_default(
+                "  FPU (e.g. fpv4-sp-d16, empty to skip) []",
+                "",
+            )
+            .map_err(|e| {
+                crate::models::FbGenError::Config(format!("failed to read FPU: {e}"))
+            })?;
+
+            let extra_flags = prompt_with_default(
+                "  Extra flags (e.g. -mthumb, empty to skip) []",
+                "",
+            )
+            .map_err(|e| {
+                crate::models::FbGenError::Config(format!("failed to read extra flags: {e}"))
+            })?;
+
+            let linker_script = prompt_with_default(
+                "  Linker script path (empty to skip) []",
+                "",
+            )
+            .map_err(|e| {
+                crate::models::FbGenError::Config(format!("failed to read linker script: {e}"))
+            })?;
+
+            Some(crate::models::project::ToolchainConfig {
+                cpu,
+                float_abi,
+                fpu,
+                extra_flags,
+                linker_script,
+            })
         } else {
-            String::new()
+            None
         };
 
         // ── compiler ──────────────────────────────────────────────
@@ -206,7 +240,7 @@ impl UserQuery {
             generated_at: String::new(),
             cmake_presets: None,
             toolchain_files: vec![],
-            mcu_flags,
+            toolchain,
         };
 
         Ok(config)
@@ -231,6 +265,22 @@ impl UserQuery {
         println!("  CMake min version: {}", config.cmake_min_version);
         println!("  Root:              {}", config.root.display());
         println!("  Output dir:        {}", config.output_dir.display());
+        if let Some(ref tc) = config.toolchain {
+            println!("  ── Toolchain ────────────────────────────────────────");
+            println!("    CPU:              {}", tc.cpu);
+            if !tc.float_abi.is_empty() {
+                println!("    Float ABI:        {}", tc.float_abi);
+            }
+            if !tc.fpu.is_empty() {
+                println!("    FPU:              {}", tc.fpu);
+            }
+            if !tc.extra_flags.is_empty() {
+                println!("    Extra flags:      {}", tc.extra_flags);
+            }
+            if !tc.linker_script.is_empty() {
+                println!("    Linker script:    {}", tc.linker_script);
+            }
+        }
         println!("  ────────────────────────────────────────────────────");
 
         match prompt("  Proceed with this configuration? [Y/n]: ") {
