@@ -89,6 +89,11 @@ impl Default for ScanOptions {
                 "node_modules".into(),
                 ".cache".into(),
                 "target".into(),
+                "CMakeFiles".into(),
+                "cmake-build-debug".into(),
+                "cmake-build-release".into(),
+                ".idea".into(),
+                ".vscode".into(),
             ],
             languages: vec![
                 "c".into(),

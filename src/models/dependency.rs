@@ -1,7 +1,7 @@
-use crate::models::error::{FbGenError, Result};
+use crate::models::error::{FbGenError, FbGenResult};
+use petgraph::algo;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
-use petgraph::algo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -73,7 +73,7 @@ impl DependencyGraph {
     ///
     /// The result is in dependency-first order: modules with no dependencies
     /// come first, so they can be built before modules that depend on them.
-    pub fn topological_order(&self) -> Result<Vec<String>> {
+    pub fn topological_order(&self) -> FbGenResult<Vec<String>> {
         algo::toposort(&self.graph, None)
             .map_err(|cycle_err| {
                 let node_id = cycle_err.node_id();

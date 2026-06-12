@@ -2,7 +2,7 @@
 //! so incremental runs can skip unchanged files.
 
 use crate::models::ProjectMeta;
-use crate::models::{FbGenError, Result};
+use crate::models::{FbGenError, FbGenResult};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -46,7 +46,7 @@ impl MetaCache {
     }
 
     /// Ensure the cache directory exists on disk.
-    fn ensure_dir(&self) -> Result<()> {
+    fn ensure_dir(&self) -> FbGenResult<()> {
         std::fs::create_dir_all(&self.cache_dir).map_err(FbGenError::Io)
     }
 
@@ -71,7 +71,7 @@ impl MetaCache {
 
     /// Persist the full `ProjectMeta` to three JSON files under the cache
     /// directory: `project.json`, `modules.json`, `checksums.json`.
-    pub fn save(&self, meta: &ProjectMeta) -> Result<()> {
+    pub fn save(&self, meta: &ProjectMeta) -> FbGenResult<()> {
         self.ensure_dir()?;
 
         // Write project-level metadata (excluding modules & checksums).
@@ -108,8 +108,15 @@ impl MetaCache {
             }
         }
 
-        let project_bytes =
-            serde_json::to_vec_pretty(&project).map_err(|e| FbGenError::Serialization(e.to_string()))?;
+        // Include toolchain config if present.
+        if let Some(ref tc) = meta.config.toolchain {
+            if let Ok(val) = serde_json::to_value(tc) {
+                project["toolchain"] = val;
+            }
+        }
+
+        let project_bytes = serde_json::to_vec_pretty(&project)
+            .map_err(|e| FbGenError::Serialization(e.to_string()))?;
         std::fs::write(self.project_json(), &project_bytes).map_err(FbGenError::Io)?;
 
         // Write modules separately.
@@ -168,16 +175,12 @@ impl MetaCache {
                 .and_then(|v| v.as_str())
                 .unwrap_or("17")
                 .to_string(),
-            target_arch: serde_json::from_value(
-                project_json.get("target_arch")?.clone(),
-            )
-            .unwrap_or(crate::models::TargetArch::X86_64),
+            target_arch: serde_json::from_value(project_json.get("target_arch")?.clone())
+                .unwrap_or(crate::models::TargetArch::X86_64),
             compiler: serde_json::from_value(project_json.get("compiler")?.clone())
                 .unwrap_or(crate::models::Compiler::GCC),
-            build_backend: serde_json::from_value(
-                project_json.get("build_backend")?.clone(),
-            )
-            .unwrap_or_default(),
+            build_backend: serde_json::from_value(project_json.get("build_backend")?.clone())
+                .unwrap_or_default(),
             cmake_min_version: project_json
                 .get("cmake_min_version")
                 .and_then(|v| v.as_str())
@@ -215,7 +218,9 @@ impl MetaCache {
                 .get("toolchain_files")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default(),
-            toolchain: None,
+            toolchain: project_json
+                .get("toolchain")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
         };
 
         let dependency_graph: crate::models::DependencySnapshot =
@@ -244,7 +249,7 @@ impl MetaCache {
     }
 
     /// Remove all cached files without removing the cache directory itself.
-    pub fn clear(&self) -> Result<()> {
+    pub fn clear(&self) -> FbGenResult<()> {
         if self.project_json().exists() {
             std::fs::remove_file(self.project_json()).map_err(FbGenError::Io)?;
         }
@@ -274,7 +279,7 @@ impl MetaCache {
     }
 
     /// Persist only the checksums map (used during incremental updates).
-    pub fn save_checksums(&self, checksums: &HashMap<String, String>) -> Result<()> {
+    pub fn save_checksums(&self, checksums: &HashMap<String, String>) -> FbGenResult<()> {
         self.ensure_dir()?;
         let mut file = std::fs::File::create(self.checksums_json()).map_err(FbGenError::Io)?;
         let json = serde_json::to_string_pretty(checksums)
@@ -370,8 +375,12 @@ mod tests {
         let checksums = cache.compute_checksums(&[file_a.clone(), file_b.clone()]);
 
         assert_eq!(checksums.len(), 2);
-        let hash_a = checksums.get(&file_a.to_string_lossy().to_string()).unwrap();
-        let hash_b = checksums.get(&file_b.to_string_lossy().to_string()).unwrap();
+        let hash_a = checksums
+            .get(&file_a.to_string_lossy().to_string())
+            .unwrap();
+        let hash_b = checksums
+            .get(&file_b.to_string_lossy().to_string())
+            .unwrap();
         assert_ne!(hash_a, hash_b); // different content → different hash
     }
 

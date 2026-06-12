@@ -1,6 +1,6 @@
 //! Workflow engine — orchestrates the scan → resolve → generate pipeline.
 
-use crate::models::{ProjectConfig, Result};
+use crate::models::{FbGenResult, ProjectConfig};
 use std::time::Instant;
 
 /// Phases of the workflow pipeline.
@@ -127,7 +127,7 @@ impl WorkflowEngine {
     /// before invoking `execute_full`. The default implementation advances
     /// through phases without performing real work — real logic is injected
     /// via the phase-specific methods.
-    pub fn execute_full(&mut self) -> Result<WorkflowResult> {
+    pub fn execute_full(&mut self) -> FbGenResult<WorkflowResult> {
         self.started_at = Some(Instant::now());
 
         self.run_scanning()?;
@@ -155,7 +155,10 @@ impl WorkflowEngine {
     /// Run an incremental workflow, processing only `changed_files`.
     ///
     /// Only phases affected by the changed files are re-executed.
-    pub fn execute_incremental(&mut self, changed_files: &[std::path::PathBuf]) -> Result<WorkflowResult> {
+    pub fn execute_incremental(
+        &mut self,
+        changed_files: &[std::path::PathBuf],
+    ) -> FbGenResult<WorkflowResult> {
         self.started_at = Some(Instant::now());
 
         if changed_files.is_empty() {
@@ -217,43 +220,43 @@ impl WorkflowEngine {
 
     // ── full-run phase hooks (overrideable by external callers) ────
 
-    fn run_scanning(&mut self) -> Result<()> {
+    fn run_scanning(&mut self) -> FbGenResult<()> {
         // Stub: real scanning is performed by the scanner module.
         // Callers should replace or wrap this method.
         Ok(())
     }
 
-    fn run_discovering(&mut self) -> Result<()> {
+    fn run_discovering(&mut self) -> FbGenResult<()> {
         // Stub: module discovery groups scanned files into CMakeModules.
         Ok(())
     }
 
-    fn run_analyzing(&mut self) -> Result<()> {
+    fn run_analyzing(&mut self) -> FbGenResult<()> {
         // Stub: dependency analysis builds the DependencyGraph.
         Ok(())
     }
 
-    fn run_generating(&mut self) -> Result<()> {
+    fn run_generating(&mut self) -> FbGenResult<()> {
         // Stub: CMake generation uses tera templates.
         Ok(())
     }
 
-    fn run_validating(&mut self) -> Result<()> {
+    fn run_validating(&mut self) -> FbGenResult<()> {
         // Stub: validation checks generated output for correctness.
         Ok(())
     }
 
     // ── incremental-run phase hooks ─────────────────────────────────
 
-    fn run_scanning_incremental(&mut self, _changed: &[std::path::PathBuf]) -> Result<()> {
+    fn run_scanning_incremental(&mut self, _changed: &[std::path::PathBuf]) -> FbGenResult<()> {
         Ok(())
     }
 
-    fn run_analyzing_incremental(&mut self, _changed: &[std::path::PathBuf]) -> Result<()> {
+    fn run_analyzing_incremental(&mut self, _changed: &[std::path::PathBuf]) -> FbGenResult<()> {
         Ok(())
     }
 
-    fn run_generating_incremental(&mut self, _changed: &[std::path::PathBuf]) -> Result<()> {
+    fn run_generating_incremental(&mut self, _changed: &[std::path::PathBuf]) -> FbGenResult<()> {
         Ok(())
     }
 }

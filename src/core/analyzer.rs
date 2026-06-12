@@ -7,7 +7,7 @@
 //! the filename against headers declared in other modules.
 
 use crate::models::dependency::{DependencyEdge, DependencyGraph, DependencyType};
-use crate::models::error::Result;
+use crate::models::error::FbGenResult;
 use crate::models::module::CMakeModule;
 use std::collections::HashSet;
 
@@ -38,7 +38,7 @@ impl DependencyAnalyzer {
     ///
     /// Assembly sources (`.S`) are included because they go through the C
     /// preprocessor and may `#include` module headers.
-    pub fn analyze(&self, modules: &[CMakeModule]) -> Result<DependencyGraph> {
+    pub fn analyze(&self, modules: &[CMakeModule]) -> FbGenResult<DependencyGraph> {
         let mut graph = DependencyGraph::new();
 
         // Register all modules as graph nodes.
@@ -47,8 +47,7 @@ impl DependencyAnalyzer {
         }
 
         // Build lookup sets.
-        let module_names: HashSet<&str> =
-            modules.iter().map(|m| m.name.as_str()).collect();
+        let module_names: HashSet<&str> = modules.iter().map(|m| m.name.as_str()).collect();
 
         let short_names: HashSet<&str> = modules
             .iter()
@@ -64,32 +63,26 @@ impl DependencyAnalyzer {
         }
 
         for module in modules {
-            let all_includes: Vec<(&str, &str)> = module
-                .sources
-                .iter()
-                .flat_map(|sf| {
-                    sf.includes
-                        .iter()
-                        .map(move |inc| (inc.as_str(), "source"))
-                })
-                .chain(module.asm_sources.iter().flat_map(|af| {
-                    af.includes
-                        .iter()
-                        .map(move |inc| (inc.as_str(), "asm"))
-                }))
-                .chain(module.headers.iter().flat_map(|hf| {
-                    hf.includes
-                        .iter()
-                        .map(move |inc| (inc.as_str(), "header"))
-                }))
-                .collect();
+            let all_includes: Vec<(&str, &str)> =
+                module
+                    .sources
+                    .iter()
+                    .flat_map(|sf| sf.includes.iter().map(move |inc| (inc.as_str(), "source")))
+                    .chain(
+                        module.asm_sources.iter().flat_map(|af| {
+                            af.includes.iter().map(move |inc| (inc.as_str(), "asm"))
+                        }),
+                    )
+                    .chain(
+                        module.headers.iter().flat_map(|hf| {
+                            hf.includes.iter().map(move |inc| (inc.as_str(), "header"))
+                        }),
+                    )
+                    .collect();
 
             for (include_str, label) in &all_includes {
                 // Extract first path segment before '/'.
-                let first_segment = include_str
-                    .split('/')
-                    .next()
-                    .unwrap_or(include_str);
+                let first_segment = include_str.split('/').next().unwrap_or(include_str);
 
                 // Skip self-references.
                 if first_segment == module.name {
@@ -119,10 +112,7 @@ impl DependencyAnalyzer {
                 } else {
                     // ── Filename fallback (bare include like "foo.h") ──
                     // Extract the filename (last path segment).
-                    let filename = include_str
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(include_str);
+                    let filename = include_str.rsplit('/').next().unwrap_or(include_str);
 
                     // Find a module (other than self) whose headers contain this filename.
                     match header_to_module
@@ -143,7 +133,8 @@ impl DependencyAnalyzer {
                         dep_type: DependencyType::Public,
                         reason: format!(
                             "#include \"{}\" in {} {}",
-                            include_str, label,
+                            include_str,
+                            label,
                             if *label == "source" {
                                 "source"
                             } else if *label == "asm" {

@@ -39,4 +39,4 @@ pub enum FbGenError {
     Regex(#[from] regex::Error),
 }
 
-pub type Result<T> = std::result::Result<T, FbGenError>;
+pub type FbGenResult<T> = std::result::Result<T, FbGenError>;

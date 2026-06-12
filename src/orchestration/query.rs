@@ -143,6 +143,9 @@ impl UserQuery {
                 float_abi,
                 fpu,
                 extra_flags,
+                prefix: String::new(),
+                sysroot: None,
+                find_root_path: Vec::new(),
             })
         } else {
             None

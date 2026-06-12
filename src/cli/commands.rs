@@ -42,11 +42,18 @@ fn scanner_opts(cli: &Cli, config: &ProjectConfig) -> scanner::ScanOptions {
         "ld".into(),
     ];
 
-    let exclude_dirs = if cli.exclude.is_empty() {
-        config.exclude_dirs.clone()
+    // Start with built-in defaults, then union in user-specified excludes.
+    let mut exclude_dirs: Vec<String> = scanner::ScanOptions::default().exclude_dirs;
+    let user_excludes = if cli.exclude.is_empty() {
+        &config.exclude_dirs
     } else {
-        cli.exclude.clone()
+        &cli.exclude
     };
+    for d in user_excludes {
+        if !exclude_dirs.contains(d) {
+            exclude_dirs.push(d.clone());
+        }
+    }
 
     scanner::ScanOptions {
         root,
@@ -64,11 +71,18 @@ fn discoverer_opts(cli: &Cli, config: &ProjectConfig) -> crate::core::ScanOption
         cli.root.clone()
     };
 
-    let exclude_dirs = if cli.exclude.is_empty() {
-        config.exclude_dirs.clone()
+    // Start with built-in defaults, then union in user-specified excludes.
+    let mut exclude_dirs: Vec<String> = crate::core::ScanOptions::default().exclude_dirs;
+    let user_excludes = if cli.exclude.is_empty() {
+        &config.exclude_dirs
     } else {
-        cli.exclude.clone()
+        &cli.exclude
     };
+    for d in user_excludes {
+        if !exclude_dirs.contains(d) {
+            exclude_dirs.push(d.clone());
+        }
+    }
 
     crate::core::ScanOptions { root, exclude_dirs }
 }
@@ -920,7 +934,7 @@ fn cmake_toolchain_args(config: &ProjectConfig) -> Vec<String> {
                 .iter()
                 .find_map(|cp| cp.toolchain_file.as_ref())
         })
-        .map(|tf| config.root.join(tf))
+        .map(|tf| CMakeGenerator::resolve_preset_path(&config.root, tf))
         .unwrap_or_else(|| config.root.join("cmake").join("toolchain.cmake"));
 
     if path.exists() {

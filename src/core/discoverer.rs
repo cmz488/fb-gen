@@ -6,7 +6,7 @@
 //! Modules with `main()` → `Executable`; header-only dirs → `HeaderOnly`;
 //! asm+header-only dirs → `StaticLibrary`; default → `StaticLibrary`.
 
-use crate::models::error::Result;
+use crate::models::error::FbGenResult;
 use crate::models::module::{CMakeModule, SourceFile, TargetType};
 use regex::Regex;
 use std::collections::BTreeMap;
@@ -30,6 +30,7 @@ impl Default for ScanOptions {
                 "third_party".into(),
                 "cmake-build-debug".into(),
                 "cmake-build-release".into(),
+                "CMakeFiles".into(),
                 ".idea".into(),
                 ".vscode".into(),
             ],
@@ -60,16 +61,13 @@ impl ModuleDiscoverer {
     /// * Linker scripts (`.ld`) are assigned to their directory's module if one
     ///   exists; otherwise they are placed in the root module.
     /// * All other modules default to `StaticLibrary`.
-    pub fn discover(&self, sources: &[SourceFile]) -> Result<Vec<CMakeModule>> {
+    pub fn discover(&self, sources: &[SourceFile]) -> FbGenResult<Vec<CMakeModule>> {
         // Group files by their parent directory (relative to project root).
         let mut dirs: BTreeMap<PathBuf, Vec<&SourceFile>> = BTreeMap::new();
 
         for sf in sources {
             // Determine the directory containing this file.
-            let parent = sf
-                .relative_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."));
+            let parent = sf.relative_path.parent().unwrap_or_else(|| Path::new("."));
 
             // Skip excluded directories.
             if self.is_excluded(parent) {
@@ -176,6 +174,45 @@ impl ModuleDiscoverer {
             }
         }
 
+        // Merge root-level source/asm files into the executable module.
+        // Root-level compilable files (e.g. startup_*.s for embedded projects)
+        // would otherwise be silently dropped because the generator skips
+        // `is_root` modules.  Root modules that only hold linker scripts or
+        // headers are left alone — linker scripts are handled by
+        // `detect_linker_scripts()` in the generator.
+        if let Some(root_idx) = modules.iter().position(|m| m.is_root) {
+            let has_compilable = !modules[root_idx].sources.is_empty()
+                || !modules[root_idx].asm_sources.is_empty();
+
+            if has_compilable {
+                if let Some(exe_idx) = modules
+                    .iter()
+                    .position(|m| m.target_type == TargetType::Executable && !m.is_root)
+                {
+                    // Merge root files into the executable module.
+                    let mut root = modules.remove(root_idx);
+                    let exe = &mut modules[if exe_idx > root_idx { exe_idx - 1 } else { exe_idx }];
+                    exe.sources.append(&mut root.sources);
+                    exe.asm_sources.append(&mut root.asm_sources);
+                    exe.headers.append(&mut root.headers);
+                    exe.linker_scripts.append(&mut root.linker_scripts);
+                    // Merge include dirs (avoid duplicates).
+                    for d in root.include_dirs {
+                        if !exe.include_dirs.contains(&d) {
+                            exe.include_dirs.push(d);
+                        }
+                    }
+                } else {
+                    // No executable module — keep the root module but let the
+                    // generator produce a CMakeLists.txt for it.
+                    modules[root_idx].is_root = false;
+                    if modules[root_idx].name.is_empty() {
+                        modules[root_idx].name = "root".into();
+                    }
+                }
+            }
+        }
+
         if modules.is_empty() {
             return Err(crate::models::error::FbGenError::NoSources(
                 self.options.root.display().to_string(),
@@ -189,11 +226,8 @@ impl ModuleDiscoverer {
     fn is_excluded(&self, dir: &Path) -> bool {
         self.options.exclude_dirs.iter().any(|ex| {
             // Match if any path component equals the excluded name.
-            dir.components().any(|c| {
-                c.as_os_str()
-                    .to_str()
-                    .is_some_and(|s| s == ex.as_str())
-            })
+            dir.components()
+                .any(|c| c.as_os_str().to_str().is_some_and(|s| s == ex.as_str()))
         })
     }
 }
@@ -267,7 +301,10 @@ mod tests {
         assert_eq!(CMakeModule::sanitize_name(Path::new(".")), "");
         assert_eq!(CMakeModule::sanitize_name(Path::new("")), "");
         assert_eq!(CMakeModule::sanitize_name(Path::new("src")), "src");
-        assert_eq!(CMakeModule::sanitize_name(Path::new("src/core")), "src_core");
+        assert_eq!(
+            CMakeModule::sanitize_name(Path::new("src/core")),
+            "src_core"
+        );
         assert_eq!(CMakeModule::sanitize_name(Path::new("my-lib")), "my_lib");
     }
 

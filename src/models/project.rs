@@ -55,6 +55,22 @@ pub struct ToolchainConfig {
     /// Appended verbatim to TARGET_FLAGS.
     pub extra_flags: String,
 
+    /// Toolchain prefix, e.g. `"arm-none-eabi-"`. Also serves as the
+    /// gate for toolchain generation: when non-empty, ARM32, ARM64, and
+    /// RISCV64 targets also produce a toolchain file.
+    #[serde(default)]
+    pub prefix: String,
+
+    /// Sysroot returned by `<prefix>gcc -print-sysroot`. `None` when
+    /// the compiler reports an empty sysroot (common for bare-metal).
+    /// When `Some`, `CMAKE_SYSROOT` and `CMAKE_FIND_ROOT_PATH` are set.
+    #[serde(default)]
+    pub sysroot: Option<String>,
+
+    /// Extra entries for `CMAKE_FIND_ROOT_PATH` beyond the sysroot itself.
+    /// Appended after `${CMAKE_SYSROOT}` in the generated toolchain file.
+    #[serde(default)]
+    pub find_root_path: Vec<String>,
 }
 
 impl Default for ToolchainConfig {
@@ -64,6 +80,9 @@ impl Default for ToolchainConfig {
             float_abi: String::new(),
             fpu: String::new(),
             extra_flags: String::new(),
+            prefix: String::new(),
+            sysroot: None,
+            find_root_path: Vec::new(),
         }
     }
 }
