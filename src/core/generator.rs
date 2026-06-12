@@ -13,7 +13,7 @@
 //! | Target file contains `# USER_START` … `# USER_END` blocks | Preserve those blocks in the output. |
 
 use crate::models::dependency::{DependencyGraph, DependencyType};
-use crate::models::error::{FbGenError, Result};
+use crate::models::error::{FbGenError, FbGenResult};
 use crate::models::module::CMakeModule;
 use crate::models::project::{ProjectConfig, TargetArch, ToolchainConfig};
 use std::collections::HashSet;
@@ -48,6 +48,9 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # ── User customisations ─────────────────────────────────────────────────────
 # USER_START
+{% for um in user_modules -%}
+add_subdirectory({{ um }})
+{% endfor %}
 # USER_END
 
 # ── Sub-modules ─────────────────────────────────────────────────────────────
@@ -152,7 +155,7 @@ pub struct CMakeGenerator {
 
 impl CMakeGenerator {
     /// Create a new generator tied to the given project configuration.
-    pub fn new(config: &ProjectConfig) -> Result<Self> {
+    pub fn new(config: &ProjectConfig) -> FbGenResult<Self> {
         let mut tera = Tera::default();
 
         // Register hard-coded templates.
@@ -182,14 +185,17 @@ impl CMakeGenerator {
         modules: &[CMakeModule],
         graph: &DependencyGraph,
         force: bool,
-    ) -> Result<()> {
+        user_modules: &[PathBuf],
+    ) -> FbGenResult<()> {
+        let root_ld_scripts = detect_linker_scripts(&self.config.root);
+
         // ── Root CMakeLists.txt ────────────────────────────────────────
-        let root_content = self.render_root(modules, graph)?;
+        let root_content = self.render_root(modules, graph, user_modules)?;
         let root_path = self.config.root.join("CMakeLists.txt");
         self.write_if_changed(&root_path, &root_content, "root", force)?;
 
         // ── Toolchain file (cross-compile only) ───────────────────────
-        if let Some(toolchain_content) = self.render_toolchain()? {
+        if let Some(toolchain_content) = self.render_toolchain(&root_ld_scripts)? {
             let toolchain_path = self.resolve_toolchain_path();
             // Ensure parent directory exists.
             if let Some(parent) = toolchain_path.parent() {
@@ -211,7 +217,7 @@ impl CMakeGenerator {
             }
 
             let deps: Vec<(String, DependencyType)> = graph.get_dependencies(&module.name);
-            let content = self.render_module(module, &deps)?;
+            let content = self.render_module(module, &deps, graph)?;
             let module_cmake_path = module.path.join("CMakeLists.txt");
             self.write_if_changed(&module_cmake_path, &content, &module.name, force)?;
         }
@@ -222,7 +228,7 @@ impl CMakeGenerator {
     // ── Private helpers ─────────────────────────────────────────────────────
 
     /// Render the root CMakeLists.txt.
-    fn render_root(&self, modules: &[CMakeModule], graph: &DependencyGraph) -> Result<String> {
+    fn render_root(&self, modules: &[CMakeModule], graph: &DependencyGraph, user_modules: &[PathBuf]) -> FbGenResult<String> {
         let mut ctx = Context::new();
 
         ctx.insert("cmake_min_version", &self.config.cmake_min_version);
@@ -289,15 +295,24 @@ impl CMakeGenerator {
                     .map(|m| m.relative_path.to_string_lossy().to_string())
             })
             .collect();
+        let user_module_dirs: Vec<String> = user_modules
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        ctx.insert("user_modules", &user_module_dirs);
+
         ctx.insert("subdirs", &subdirs);
 
-        self.tera
-            .render("root", &ctx)
-            .map_err(FbGenError::Template)
+        self.tera.render("root", &ctx).map_err(FbGenError::Template)
     }
 
     /// Render a per-module CMakeLists.txt.
-    fn render_module(&self, module: &CMakeModule, deps: &[(String, DependencyType)]) -> Result<String> {
+    fn render_module(
+        &self,
+        module: &CMakeModule,
+        deps: &[(String, DependencyType)],
+        graph: &DependencyGraph,
+    ) -> FbGenResult<String> {
         // Defence-in-depth: root module with empty name should never reach here
         // (generate() skips is_root modules), but guard against it anyway.
         if module.name.is_empty() && module.is_root {
@@ -390,7 +405,12 @@ impl CMakeGenerator {
         ctx.insert("include_dirs", &include_dirs);
 
         // Dependencies with their type.
-        let dep_list: Vec<tera::Value> = deps
+        let ordered_modules = graph.topological_order().unwrap_or_default();
+        let mut sorted_deps = deps.to_vec();
+        sorted_deps.sort_by_key(|(name, _)| {
+            ordered_modules.iter().position(|n| n == name).unwrap_or(usize::MAX)
+        });
+        let dep_list: Vec<tera::Value> = sorted_deps
             .iter()
             .map(|(name, dep_type)| {
                 let mut m = tera::Map::new();
@@ -437,7 +457,7 @@ impl CMakeGenerator {
     /// (ARM32, ARM64, X86_64, X86, WASM, Custom) or no ToolchainConfig is set.
     ///
     /// Returns `Err` if NoneEabi has no ToolchainConfig or the CPU field is empty.
-    fn render_toolchain(&self) -> Result<Option<String>> {
+    fn render_toolchain(&self, root_ld_scripts: &[String]) -> FbGenResult<Option<String>> {
         let tc = match &self.config.toolchain {
             Some(tc) => tc,
             None => {
@@ -463,12 +483,8 @@ impl CMakeGenerator {
         }
 
         match &self.config.target_arch {
-            TargetArch::NoneEabi => {
-                Ok(Some(render_arm_eabi_toolchain(tc)))
-            }
-            TargetArch::RISCV64 => {
-                Ok(Some(render_riscv64_toolchain(tc)))
-            }
+            TargetArch::NoneEabi => Ok(Some(render_arm_eabi_toolchain(tc, root_ld_scripts))),
+            TargetArch::RISCV64 => Ok(Some(render_riscv64_toolchain(tc, root_ld_scripts))),
             _ => Ok(None),
         }
     }
@@ -500,7 +516,13 @@ impl CMakeGenerator {
     ///
     /// * `force=true` — overwrite directly (init mode).
     /// * `force=false` — write to `.new` if file exists and differs (sync mode).
-    fn write_if_changed(&self, dest: &Path, new_content: &str, label: &str, force: bool) -> Result<()> {
+    fn write_if_changed(
+        &self,
+        dest: &Path,
+        new_content: &str,
+        label: &str,
+        force: bool,
+    ) -> FbGenResult<()> {
         if dest.exists() {
             let existing = fs::read_to_string(dest).map_err(FbGenError::Io)?;
 
@@ -527,10 +549,7 @@ impl CMakeGenerator {
                     new_content
                 };
                 fs::write(dest, content_to_write).map_err(FbGenError::Io)?;
-                eprintln!(
-                    "fb-gen: {} CMakeLists.txt overwritten (force mode)",
-                    label
-                );
+                eprintln!("fb-gen: {} CMakeLists.txt overwritten (force mode)", label);
             } else {
                 // Write .new file instead (sync mode).
                 let new_path = if let Some(stem) = dest.file_stem() {
@@ -555,11 +574,7 @@ impl CMakeGenerator {
                     label,
                     new_path.display()
                 );
-                eprintln!(
-                    "fb-gen:   diff {} {}",
-                    dest.display(),
-                    new_path.display()
-                );
+                eprintln!("fb-gen:   diff {} {}", dest.display(), new_path.display());
             }
         } else {
             // File doesn't exist — write directly.
@@ -578,14 +593,40 @@ impl CMakeGenerator {
 
 /// Render a complete toolchain.cmake for ARM Cortex-M bare-metal targets
 /// (arm-none-eabi-gcc).
-fn render_arm_eabi_toolchain(tc: &ToolchainConfig) -> String {
+fn render_arm_eabi_toolchain(tc: &ToolchainConfig, root_ld_scripts: &[String]) -> String {
     let prefix = "arm-none-eabi-";
-    render_embedded_toolchain("Generic", "arm", prefix, tc)
+    render_embedded_toolchain("Generic", "arm", prefix, tc, root_ld_scripts)
 }
 
-fn render_riscv64_toolchain(tc: &ToolchainConfig) -> String {
+fn render_riscv64_toolchain(tc: &ToolchainConfig, root_ld_scripts: &[String]) -> String {
     let prefix = "riscv64-unknown-elf-";
-    render_embedded_toolchain("Generic", "riscv64", prefix, tc)
+    render_embedded_toolchain("Generic", "riscv64", prefix, tc, root_ld_scripts)
+}
+
+/// Scan the project root (non-recursive) for `.ld` linker scripts.
+///
+/// Returns the detected linker script file names (basenames only).
+/// When exactly one `.ld` file is found at the root, it is used in the
+/// toolchain file.  Zero or multiple `.ld` files → empty vec.
+fn detect_linker_scripts(root: &Path) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return found,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if ext.eq_ignore_ascii_case("ld") {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        found.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if found.len() == 1 { found } else { Vec::new() }
 }
 
 /// Shared template for embedded cross-compilation toolchain files.
@@ -597,6 +638,7 @@ fn render_embedded_toolchain(
     processor: &str,
     prefix: &str,
     tc: &ToolchainConfig,
+    root_ld_scripts: &[String],
 ) -> String {
     // Assemble TARGET_FLAGS from structured fields.
     let mut flags: Vec<String> = Vec::new();
@@ -614,9 +656,8 @@ fn render_embedded_toolchain(
     }
     let target_flags = flags.join(" ");
 
-    // Linker-script flag.
-    let ld_flag = if !tc.linker_script.is_empty() {
-        format!(" -T ${{CMAKE_SOURCE_DIR}}/{}", tc.linker_script)
+    let ld_flag = if root_ld_scripts.len() == 1 {
+        format!(" -T \"${{CMAKE_SOURCE_DIR}}/{}\"", root_ld_scripts[0])
     } else {
         String::new()
     };
@@ -624,24 +665,26 @@ fn render_embedded_toolchain(
     format!(
         r#"# Auto-generated toolchain file by fb-gen
 
-set(CMAKE_SYSTEM_NAME {system_name})
-set(CMAKE_SYSTEM_PROCESSOR {processor})
+set(CMAKE_SYSTEM_NAME               {system_name})
+set(CMAKE_SYSTEM_PROCESSOR          {processor})
 
 set(CMAKE_C_COMPILER_ID GNU)
 set(CMAKE_CXX_COMPILER_ID GNU)
 
-set(TOOLCHAIN_PREFIX {prefix})
+# Some default GCC settings
+# {prefix} must be part of path environment
+set(TOOLCHAIN_PREFIX                {prefix})
 
-set(CMAKE_C_COMPILER ${{TOOLCHAIN_PREFIX}}gcc)
-set(CMAKE_ASM_COMPILER ${{CMAKE_C_COMPILER}})
-set(CMAKE_CXX_COMPILER ${{TOOLCHAIN_PREFIX}}g++)
-set(CMAKE_LINKER ${{TOOLCHAIN_PREFIX}}g++)
-set(CMAKE_OBJCOPY ${{TOOLCHAIN_PREFIX}}objcopy)
-set(CMAKE_SIZE ${{TOOLCHAIN_PREFIX}}size)
+set(CMAKE_C_COMPILER                ${{TOOLCHAIN_PREFIX}}gcc)
+set(CMAKE_ASM_COMPILER              ${{CMAKE_C_COMPILER}})
+set(CMAKE_CXX_COMPILER              ${{TOOLCHAIN_PREFIX}}g++)
+set(CMAKE_LINKER                    ${{TOOLCHAIN_PREFIX}}g++)
+set(CMAKE_OBJCOPY                   ${{TOOLCHAIN_PREFIX}}objcopy)
+set(CMAKE_SIZE                      ${{TOOLCHAIN_PREFIX}}size)
 
-set(CMAKE_EXECUTABLE_SUFFIX_ASM ".elf")
-set(CMAKE_EXECUTABLE_SUFFIX_C ".elf")
-set(CMAKE_EXECUTABLE_SUFFIX_CXX ".elf")
+set(CMAKE_EXECUTABLE_SUFFIX_ASM     ".elf")
+set(CMAKE_EXECUTABLE_SUFFIX_C       ".elf")
+set(CMAKE_EXECUTABLE_SUFFIX_CXX     ".elf")
 
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
@@ -655,8 +698,8 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 set(TARGET_FLAGS "{target_flags} ")
 
 set(CMAKE_C_FLAGS "${{CMAKE_C_FLAGS}} ${{TARGET_FLAGS}}")
-set(CMAKE_ASM_FLAGS "${{CMAKE_ASM_FLAGS}} ${{TARGET_FLAGS}} -x assembler-with-cpp -MMD -MP")
 set(CMAKE_C_FLAGS "${{CMAKE_C_FLAGS}} -Wall -fdata-sections -ffunction-sections -fstack-usage")
+set(CMAKE_ASM_FLAGS "${{CMAKE_C_FLAGS}} -x assembler-with-cpp -MMD -MP")
 
 set(CMAKE_C_FLAGS_DEBUG "-O0 -g3")
 set(CMAKE_C_FLAGS_RELEASE "-Os -g0")
@@ -666,10 +709,10 @@ set(CMAKE_CXX_FLAGS_RELEASE "-Os -g0")
 set(CMAKE_CXX_FLAGS "${{CMAKE_C_FLAGS}} -fno-rtti -fno-exceptions -fno-threadsafe-statics")
 
 set(CMAKE_EXE_LINKER_FLAGS "${{TARGET_FLAGS}}")
+set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}}{ld_flag}")
 set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} --specs=nano.specs")
 set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} -Wl,-Map=${{CMAKE_PROJECT_NAME}}.map -Wl,--gc-sections")
 set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} -Wl,--print-memory-usage")
-set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}}{ld_flag}")
 set(TOOLCHAIN_LINK_LIBRARIES "m")
 
 # ── User customisations ──────────────────────────────────────────
@@ -689,7 +732,9 @@ set(TOOLCHAIN_LINK_LIBRARIES "m")
 /// Returns the cross-compilation context tuple:
 /// `(is_cross, system_name, system_processor, c_compiler, cxx_compiler, asm_compiler, linker_flags)`
 #[allow(dead_code)]
-fn cross_compile_context(arch: &TargetArch) -> (bool, String, String, String, String, String, String) {
+fn cross_compile_context(
+    arch: &TargetArch,
+) -> (bool, String, String, String, String, String, String) {
     match arch {
         TargetArch::NoneEabi => (
             true,
@@ -737,8 +782,24 @@ fn cross_compile_context(arch: &TargetArch) -> (bool, String, String, String, St
             String::new(),
         ),
         // Custom and non-cross targets.
-        TargetArch::Custom(_) => (false, String::new(), String::new(), String::new(), String::new(), String::new(), String::new()),
-        TargetArch::X86_64 | TargetArch::X86 => (false, String::new(), String::new(), String::new(), String::new(), String::new(), String::new()),
+        TargetArch::Custom(_) => (
+            false,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
+        TargetArch::X86_64 | TargetArch::X86 => (
+            false,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
     }
 }
 
@@ -816,12 +877,16 @@ mod tests {
     fn test_merge_user_block() {
         let template = "before\n# USER_START\n# USER_END\nafter";
         let merged = merge_user_block(template, "set(FOO ON)");
-        assert_eq!(merged, "before\n# USER_START\nset(FOO ON)\n# USER_END\nafter");
+        assert_eq!(
+            merged,
+            "before\n# USER_START\nset(FOO ON)\n# USER_END\nafter"
+        );
     }
 
     #[test]
     fn test_cross_compile_context_x86_64() {
-        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) = cross_compile_context(&TargetArch::X86_64);
+        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) =
+            cross_compile_context(&TargetArch::X86_64);
         assert!(!is_cross);
         assert!(_name.is_empty());
         assert!(_cc.is_empty());
@@ -829,7 +894,8 @@ mod tests {
 
     #[test]
     fn test_cross_compile_context_arm32() {
-        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) = cross_compile_context(&TargetArch::ARM32);
+        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) =
+            cross_compile_context(&TargetArch::ARM32);
         assert!(is_cross);
         assert_eq!(_name, "Generic");
         assert_eq!(_proc, "arm");
@@ -840,7 +906,8 @@ mod tests {
 
     #[test]
     fn test_cross_compile_context_arm64() {
-        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) = cross_compile_context(&TargetArch::ARM64);
+        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) =
+            cross_compile_context(&TargetArch::ARM64);
         assert!(is_cross);
         assert_eq!(_proc, "aarch64");
         assert_eq!(_cc, "aarch64-none-elf-gcc");
@@ -848,7 +915,8 @@ mod tests {
 
     #[test]
     fn test_cross_compile_context_riscv64() {
-        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) = cross_compile_context(&TargetArch::RISCV64);
+        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) =
+            cross_compile_context(&TargetArch::RISCV64);
         assert!(is_cross);
         assert_eq!(_proc, "riscv64");
         assert_eq!(_cc, "riscv64-unknown-elf-gcc");
@@ -856,7 +924,8 @@ mod tests {
 
     #[test]
     fn test_cross_compile_context_wasm() {
-        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) = cross_compile_context(&TargetArch::WASM);
+        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) =
+            cross_compile_context(&TargetArch::WASM);
         assert!(is_cross);
         assert_eq!(_proc, "wasm32");
         assert!(_cc.is_empty()); // WASM doesn't set C compiler
@@ -865,7 +934,8 @@ mod tests {
 
     #[test]
     fn test_cross_compile_context_none_eabi() {
-        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) = cross_compile_context(&TargetArch::NoneEabi);
+        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) =
+            cross_compile_context(&TargetArch::NoneEabi);
         assert!(is_cross);
         assert_eq!(_proc, "arm");
         assert_eq!(_cc, "arm-none-eabi-gcc");
