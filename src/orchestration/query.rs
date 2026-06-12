@@ -1,6 +1,6 @@
 //! Interactive user queries — collect project configuration via stdin.
 
-use crate::models::{BuildBackend, Compiler, ProjectConfig, Result, TargetArch};
+use crate::models::{BuildBackend, Compiler, FbGenResult, ProjectConfig, TargetArch};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
@@ -33,7 +33,7 @@ pub struct UserQuery;
 impl UserQuery {
     /// Walk the user through all project-configuration questions and
     /// return a populated `ProjectConfig`.
-    pub fn ask_project_config(root: &PathBuf) -> Result<ProjectConfig> {
+    pub fn ask_project_config(root: &PathBuf) -> FbGenResult<ProjectConfig> {
         println!();
         println!("  Welcome to fb-gen — Fast Build Generate");
         println!("  Let's set up your project configuration.");
@@ -114,29 +114,21 @@ impl UserQuery {
             println!();
             println!("  ARM MCU/CPU selection:");
             println!("    Specify the target chip model for -mcpu= flag.");
-            let cpu = prompt_with_default(
-                "  ARM MCU/CPU [cortex-m3]",
-                "cortex-m3",
-            )
-            .map_err(|e| {
-                crate::models::FbGenError::Config(format!("failed to read MCU: {e}"))
-            })?;
+            let cpu =
+                prompt_with_default("  ARM MCU/CPU [cortex-m3]", "cortex-m3").map_err(|e| {
+                    crate::models::FbGenError::Config(format!("failed to read MCU: {e}"))
+                })?;
 
-            let float_abi = prompt_with_default(
-                "  Float ABI (soft/softfp/hard, empty to skip) []",
-                "",
-            )
-            .map_err(|e| {
-                crate::models::FbGenError::Config(format!("failed to read float ABI: {e}"))
-            })?;
+            let float_abi =
+                prompt_with_default("  Float ABI (soft/softfp/hard, empty to skip) []", "")
+                    .map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read float ABI: {e}"))
+                    })?;
 
-            let fpu = prompt_with_default(
-                "  FPU (e.g. fpv4-sp-d16, empty to skip) []",
-                "",
-            )
-            .map_err(|e| {
-                crate::models::FbGenError::Config(format!("failed to read FPU: {e}"))
-            })?;
+            let fpu = prompt_with_default("  FPU (e.g. fpv4-sp-d16, empty to skip) []", "")
+                .map_err(|e| {
+                    crate::models::FbGenError::Config(format!("failed to read FPU: {e}"))
+                })?;
 
             let extra_flags = prompt_with_default(
                 "  Extra flags (e.g. -mthumb, empty to skip) []",
@@ -146,20 +138,11 @@ impl UserQuery {
                 crate::models::FbGenError::Config(format!("failed to read extra flags: {e}"))
             })?;
 
-            let linker_script = prompt_with_default(
-                "  Linker script path (empty to skip) []",
-                "",
-            )
-            .map_err(|e| {
-                crate::models::FbGenError::Config(format!("failed to read linker script: {e}"))
-            })?;
-
             Some(crate::models::project::ToolchainConfig {
                 cpu,
                 float_abi,
                 fpu,
                 extra_flags,
-                linker_script,
             })
         } else {
             None
@@ -180,7 +163,9 @@ impl UserQuery {
             "3" => Compiler::MSVC,
             "4" => {
                 let custom = prompt("  Custom compiler name: ").map_err(|e| {
-                    crate::models::FbGenError::Config(format!("failed to read custom compiler: {e}"))
+                    crate::models::FbGenError::Config(format!(
+                        "failed to read custom compiler: {e}"
+                    ))
                 })?;
                 Compiler::Custom(custom)
             }
@@ -202,9 +187,7 @@ impl UserQuery {
             "3" => BuildBackend::MSBuild,
             "4" => {
                 let custom = prompt("  Custom backend name: ").map_err(|e| {
-                    crate::models::FbGenError::Config(format!(
-                        "failed to read custom backend: {e}"
-                    ))
+                    crate::models::FbGenError::Config(format!("failed to read custom backend: {e}"))
                 })?;
                 BuildBackend::Custom(custom)
             }
@@ -277,18 +260,15 @@ impl UserQuery {
             if !tc.extra_flags.is_empty() {
                 println!("    Extra flags:      {}", tc.extra_flags);
             }
-            if !tc.linker_script.is_empty() {
-                println!("    Linker script:    {}", tc.linker_script);
-            }
         }
         println!("  ────────────────────────────────────────────────────");
 
         match prompt("  Proceed with this configuration? [Y/n]: ") {
-        Ok(answer) => {
-            let trimmed = answer.trim().to_lowercase();
-            trimmed.is_empty() || trimmed == "y" || trimmed == "yes"
-        }
-        Err(_) => false,
+            Ok(answer) => {
+                let trimmed = answer.trim().to_lowercase();
+                trimmed.is_empty() || trimmed == "y" || trimmed == "yes"
+            }
+            Err(_) => false,
         }
     }
 }

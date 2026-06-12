@@ -55,9 +55,6 @@ pub struct ToolchainConfig {
     /// Appended verbatim to TARGET_FLAGS.
     pub extra_flags: String,
 
-    /// Linker script path relative to the project root.
-    /// Generates `-T <path>` linker flag.
-    pub linker_script: String,
 }
 
 impl Default for ToolchainConfig {
@@ -67,7 +64,6 @@ impl Default for ToolchainConfig {
             float_abi: String::new(),
             fpu: String::new(),
             extra_flags: String::new(),
-            linker_script: String::new(),
         }
     }
 }
