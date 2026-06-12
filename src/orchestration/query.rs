@@ -109,47 +109,184 @@ impl UserQuery {
             _ => TargetArch::X86_64,
         };
 
-        // ── Toolchain config (NoneEabi bare-metal targets only) ────
-        let toolchain = if matches!(target_arch, TargetArch::NoneEabi) {
-            println!();
-            println!("  ARM MCU/CPU selection:");
-            println!("    Specify the target chip model for -mcpu= flag.");
-            let cpu =
-                prompt_with_default("  ARM MCU/CPU [cortex-m3]", "cortex-m3").map_err(|e| {
-                    crate::models::FbGenError::Config(format!("failed to read MCU: {e}"))
+        // ── Toolchain config (cross-compile targets) ───────────────
+        let mut toolchain: Option<crate::models::project::ToolchainConfig> = None;
+
+        if matches!(target_arch, TargetArch::NoneEabi | TargetArch::ARM32 | TargetArch::ARM64 | TargetArch::RISCV64) {
+            let detected = crate::core::detect_toolchains();
+
+            // Filter to toolchains compatible with the chosen architecture.
+            let compatible: Vec<_> = detected
+                .iter()
+                .filter(|dt| dt.suggested_arch == target_arch)
+                .collect();
+
+            if compatible.is_empty() {
+                println!();
+                println!("  No compatible toolchain auto-detected for {:?}.", target_arch);
+                println!("  Falling back to manual configuration.");
+
+                let default_prefix = match target_arch {
+                    TargetArch::NoneEabi => "arm-none-eabi-",
+                    TargetArch::ARM32 => "arm-linux-gnueabihf-",
+                    TargetArch::ARM64 => "aarch64-none-elf-",
+                    TargetArch::RISCV64 => "riscv64-unknown-elf-",
+                    _ => "",
+                };
+                let prefix = prompt_with_default(
+                    &format!("  Toolchain prefix [{}]", default_prefix),
+                    default_prefix,
+                ).map_err(|e| {
+                    crate::models::FbGenError::Config(format!("failed to read prefix: {e}"))
                 })?;
 
-            let float_abi =
-                prompt_with_default("  Float ABI (soft/softfp/hard, empty to skip) []", "")
-                    .map_err(|e| {
+                let sysroot_str = prompt_with_default(
+                    "  Sysroot path (empty to skip) []", ""
+                ).map_err(|e| {
+                    crate::models::FbGenError::Config(format!("failed to read sysroot: {e}"))
+                })?;
+                let sysroot = if sysroot_str.is_empty() { None } else { Some(sysroot_str) };
+
+                let find_root_str = prompt_with_default(
+                    "  Extra CMAKE_FIND_ROOT_PATH entries (space-separated, empty to skip) []", ""
+                ).map_err(|e| {
+                    crate::models::FbGenError::Config(format!("failed to read find root path: {e}"))
+                })?;
+                let find_root_path: Vec<String> = find_root_str
+                    .split_whitespace()
+                    .map(String::from)
+                    .collect();
+
+                // MCU/CPU prompts for NoneEabi only.
+                let (cpu, float_abi, fpu, extra_flags) = if matches!(target_arch, TargetArch::NoneEabi) {
+                    println!();
+                    println!("  ARM MCU/CPU selection:");
+                    println!("    Specify the target chip model for -mcpu= flag.");
+                    let cpu = prompt_with_default("  ARM MCU/CPU [cortex-m3]", "cortex-m3")
+                        .map_err(|e| {
+                            crate::models::FbGenError::Config(format!("failed to read MCU: {e}"))
+                        })?;
+                    let float_abi = prompt_with_default(
+                        "  Float ABI (soft/softfp/hard, empty to skip) []", ""
+                    ).map_err(|e| {
                         crate::models::FbGenError::Config(format!("failed to read float ABI: {e}"))
                     })?;
+                    let fpu = prompt_with_default(
+                        "  FPU (e.g. fpv4-sp-d16, empty to skip) []", ""
+                    ).map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read FPU: {e}"))
+                    })?;
+                    let extra_flags = prompt_with_default(
+                        "  Extra flags (e.g. -mthumb, empty to skip) []", ""
+                    ).map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read extra flags: {e}"))
+                    })?;
+                    (cpu, float_abi, fpu, extra_flags)
+                } else {
+                    (String::new(), String::new(), String::new(), String::new())
+                };
 
-            let fpu = prompt_with_default("  FPU (e.g. fpv4-sp-d16, empty to skip) []", "")
-                .map_err(|e| {
-                    crate::models::FbGenError::Config(format!("failed to read FPU: {e}"))
+                toolchain = Some(crate::models::project::ToolchainConfig {
+                    cpu,
+                    float_abi,
+                    fpu,
+                    extra_flags,
+                    prefix,
+                    sysroot,
+                    find_root_path,
+                });
+            } else {
+                // Show detected toolchains for the user to pick from.
+                println!();
+                println!("  Detected {} compatible toolchain(s) for {:?}:", compatible.len(), target_arch);
+                for (i, dt) in compatible.iter().enumerate() {
+                    let sysroot_display = dt.sysroot.as_ref()
+                        .map(|s| s.display().to_string())
+                        .unwrap_or_else(|| "none".into());
+                    println!("    {}) {} → {}  (sysroot: {})", i + 1, dt.prefix, dt.cc_path.display(), sysroot_display);
+                }
+                println!("    {}) Custom — enter prefix and sysroot manually", compatible.len() + 1);
+
+                let choice = prompt_with_default(
+                    &format!("  Choose toolchain [1-{}]", compatible.len() + 1),
+                    "1",
+                ).map_err(|e| {
+                    crate::models::FbGenError::Config(format!("failed to read choice: {e}"))
                 })?;
 
-            let extra_flags = prompt_with_default(
-                "  Extra flags (e.g. -mthumb, empty to skip) []",
-                "",
-            )
-            .map_err(|e| {
-                crate::models::FbGenError::Config(format!("failed to read extra flags: {e}"))
-            })?;
+                let (prefix, sysroot, find_root_path) = if let Ok(idx) = choice.parse::<usize>() {
+                    if idx >= 1 && idx <= compatible.len() {
+                        let dt = &compatible[idx - 1];
+                        (
+                            dt.prefix.clone(),
+                            dt.sysroot.clone().map(|p| p.to_string_lossy().to_string()),
+                            Vec::new(),
+                        )
+                    } else {
+                        // Custom entry.
+                        let prefix = prompt_with_default("  Toolchain prefix", "arm-none-eabi-")
+                            .map_err(|e| {
+                                crate::models::FbGenError::Config(format!("failed to read prefix: {e}"))
+                            })?;
+                        let sysroot_str = prompt_with_default(
+                            "  Sysroot path (empty to skip) []", ""
+                        ).map_err(|e| {
+                            crate::models::FbGenError::Config(format!("failed to read sysroot: {e}"))
+                        })?;
+                        let sysroot = if sysroot_str.is_empty() { None } else { Some(sysroot_str) };
+                        let find_root_str = prompt_with_default(
+                            "  Extra CMAKE_FIND_ROOT_PATH entries (space-separated) []", ""
+                        ).map_err(|e| {
+                            crate::models::FbGenError::Config(format!("failed to read find root: {e}"))
+                        })?;
+                        let find_root_path: Vec<String> = find_root_str
+                            .split_whitespace()
+                            .map(String::from)
+                            .collect();
+                        (prefix, sysroot, find_root_path)
+                    }
+                } else {
+                    ("arm-none-eabi-".into(), None, Vec::new())
+                };
 
-            Some(crate::models::project::ToolchainConfig {
-                cpu,
-                float_abi,
-                fpu,
-                extra_flags,
-                prefix: String::new(),
-                sysroot: None,
-                find_root_path: Vec::new(),
-            })
-        } else {
-            None
-        };
+                // MCU/CPU prompts for NoneEabi (even when auto-detected).
+                let (cpu, float_abi, fpu, extra_flags) = if matches!(target_arch, TargetArch::NoneEabi) {
+                    println!();
+                    println!("  ARM MCU/CPU selection:");
+                    let cpu = prompt_with_default("  ARM MCU/CPU [cortex-m3]", "cortex-m3")
+                        .map_err(|e| {
+                            crate::models::FbGenError::Config(format!("failed to read MCU: {e}"))
+                        })?;
+                    let float_abi = prompt_with_default(
+                        "  Float ABI (soft/softfp/hard, empty to skip) []", ""
+                    ).map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read float ABI: {e}"))
+                    })?;
+                    let fpu = prompt_with_default(
+                        "  FPU (e.g. fpv4-sp-d16, empty to skip) []", ""
+                    ).map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read FPU: {e}"))
+                    })?;
+                    let extra_flags = prompt_with_default("  Extra flags (e.g. -mthumb) []", "")
+                        .map_err(|e| {
+                            crate::models::FbGenError::Config(format!("failed to read extra flags: {e}"))
+                        })?;
+                    (cpu, float_abi, fpu, extra_flags)
+                } else {
+                    (String::new(), String::new(), String::new(), String::new())
+                };
+
+                toolchain = Some(crate::models::project::ToolchainConfig {
+                    cpu,
+                    float_abi,
+                    fpu,
+                    extra_flags,
+                    prefix,
+                    sysroot,
+                    find_root_path,
+                });
+            }
+        }
 
         // ── compiler ──────────────────────────────────────────────
         println!();
