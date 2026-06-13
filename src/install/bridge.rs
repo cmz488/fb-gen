@@ -124,14 +124,19 @@ pub fn write_installed_packages_marker(root: &Path) {
 
     let marker = serde_json::json!({
         "packages": records.iter().map(|r| &r.id).collect::<Vec<_>>(),
-        "updated_at": chrono::Utc::now().to_rfc3339(),
     });
 
     let marker_path = cache_dir.join("installed_packages.json");
-    if let Err(e) = std::fs::write(
-        &marker_path,
-        serde_json::to_string_pretty(&marker).unwrap_or_default(),
-    ) {
+    let content = match serde_json::to_string_pretty(&marker) {
+        Ok(s) => s,
+        Err(e) => {
+            // serde_json::Value serialization should never fail in practice,
+            // but handle it gracefully just in case.
+            eprintln!("fb-gen: warning: failed to serialize installed packages marker: {e}");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(&marker_path, &content) {
         // Non-fatal: sync will still work, just without this project's
         // package list being up-to-date.
         eprintln!("fb-gen: warning: failed to write installed packages marker: {e}");

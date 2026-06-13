@@ -88,7 +88,11 @@ add_executable({{ target_name }}
 add_library({{ target_name }} INTERFACE)
 target_include_directories({{ target_name }} INTERFACE
 {%- for d in include_dirs %}
+{%- if d is starting_with("/") or d is starting_with("${") %}
+    {{ d }}
+{%- else %}
     ${CMAKE_CURRENT_SOURCE_DIR}/{{ d }}
+{%- endif %}
 {%- endfor %}
 )
 {% else -%}

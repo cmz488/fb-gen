@@ -192,20 +192,34 @@ fn inject_installed_packages(
 ///
 /// Returns an empty string when the marker file does not exist (no packages
 /// have ever been installed for this project, or project hasn't been init-ed).
+/// Compute a djb2 hash of `<root>/.fb-gen/cache/installed_packages.json`.
+///
+/// djb2 is a simple, stable hash — unlike `DefaultHasher`, its output is
+/// guaranteed not to change across Rust toolchain versions.
+///
+/// Returns an empty string when the marker file does not exist (no packages
+/// have ever been installed for this project, or project hasn't been init-ed).
 fn compute_installed_packages_hash(root: &Path) -> String {
-    use std::hash::{Hash, Hasher};
     let marker_path = root
         .join(".fb-gen")
         .join("cache")
         .join("installed_packages.json");
     match std::fs::read(&marker_path) {
         Ok(data) => {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            data.hash(&mut hasher);
-            format!("{:016x}", hasher.finish())
+            let hash = djb2_hash(&data);
+            format!("{hash:016x}")
         }
         Err(_) => String::new(),
     }
+}
+
+/// djb2 hash — simple, stable, deterministic across Rust versions.
+fn djb2_hash(data: &[u8]) -> u64 {
+    let mut hash: u64 = 5381;
+    for &byte in data {
+        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
+    }
+    hash
 }
 
 /// Run the full scan → discover → analyze pipeline. Returns modules + optional dep graph.
@@ -548,15 +562,13 @@ fn save_sync_result(
             .collect(),
     };
 
-    let installed_packages_hash = compute_installed_packages_hash(&config.root);
-
     let meta = ProjectMeta {
         config: config.clone(),
         modules: prev_meta.modules.clone(),
         dependency_graph: dep_snapshot,
         file_checksums: prev_meta.file_checksums.clone(),
         last_sync: chrono::Utc::now().to_rfc3339(),
-        installed_packages_hash,
+        installed_packages_hash: prev_meta.installed_packages_hash.clone(),
     };
     cache.save(&meta)
 }
@@ -1437,16 +1449,15 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
             Some(mut prev_meta) => {
                 match do_incremental_sync(&root, &mut config, &mut prev_meta, &reporter) {
                     Ok(n) if n > 0 => {
-                        // Persist updated metadata.
-                        let installed_packages_hash =
-                            compute_installed_packages_hash(&root);
+                        // Persist updated metadata (hash was already
+                        // computed and stored by do_incremental_sync).
                         let meta = ProjectMeta {
                             config: config.clone(),
                             modules: prev_meta.modules,
                             dependency_graph: prev_meta.dependency_graph,
                             file_checksums: prev_meta.file_checksums,
                             last_sync: chrono::Utc::now().to_rfc3339(),
-                            installed_packages_hash,
+                            installed_packages_hash: prev_meta.installed_packages_hash.clone(),
                         };
                         if let Err(e) = cache.save(&meta) {
                             reporter.report_warning(&format!(
@@ -1988,18 +1999,19 @@ pub fn cmd_install(
     upgrade: Option<&str>,
 ) -> FbGenResult<()> {
     let reporter = Reporter::new(cli.quiet);
+    let root = resolve_root(cli)?;
 
     // ── --upgrade: upgrade a package ──
     if let Some(pkg_id) = upgrade {
         install::upgrade_package(pkg_id)?;
-        crate::install::bridge::write_installed_packages_marker(&cli.root);
+        crate::install::bridge::write_installed_packages_marker(&root);
         return Ok(());
     }
 
     // ── --uninstall: remove a package ──
     if let Some(pkg_id) = uninstall {
         install::uninstall_package(pkg_id)?;
-        crate::install::bridge::write_installed_packages_marker(&cli.root);
+        crate::install::bridge::write_installed_packages_marker(&root);
         return Ok(());
     }
 
@@ -2206,7 +2218,7 @@ pub fn cmd_install(
     // ── Execute install ──
     install::install_package(pkg)?;
 
-    crate::install::bridge::write_installed_packages_marker(&cli.root);
+    crate::install::bridge::write_installed_packages_marker(&root);
 
     reporter.report_success(&format!("Installed {} v{}", pkg.id, pkg.version));
     println!();
