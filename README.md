@@ -1,7 +1,7 @@
 # fb-gen — Fast Build Generate
   
 <p align="center" style="color:gray;">
-  A [CMakeLists.txt自动生成工具]
+  <b>CMakeLists.txt自动生成工具</b>
 </p>
 
 <p align="center">
