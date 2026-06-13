@@ -46,6 +46,13 @@ set(CMAKE_C_STANDARD {{ c_standard }})
 set(CMAKE_C_STANDARD_REQUIRED ON)
 {% endif %}
 
+{% if linker_scripts and linker_scripts|length > 0 -%}
+# ── Linker scripts ───────────────────────────────────────────────────────────
+{% for ld in linker_scripts -%}
+add_link_options(-T "${CMAKE_SOURCE_DIR}/{{ ld }}")
+{% endfor %}
+{% endif %}
+
 # ── Sub-modules ─────────────────────────────────────────────────────────────
 {% for module in subdirs -%}
 add_subdirectory({{ module }})
@@ -137,13 +144,6 @@ target_compile_definitions({{ target_name }} PRIVATE
     {{ d }}
 {%- endfor %}
 )
-{% endif %}
-
-{% if linker_scripts and linker_scripts|length > 0 -%}
-# ── Linker script ───────────────────────────────────────────────────────────
-{% for ld in linker_scripts -%}
-target_link_options({{ target_name }} PRIVATE -T "${CMAKE_CURRENT_SOURCE_DIR}/{{ ld }}")
-{% endfor %}
 {% endif %}
 
 # ── User customisations ─────────────────────────────────────────────────────
@@ -398,6 +398,22 @@ impl CMakeGenerator {
             .collect();
         ctx.insert("user_modules", &user_module_dirs);
 
+        // Collect linker scripts from all modules (paths relative to project root).
+        let mut linker_scripts: Vec<String> = Vec::new();
+        for m in modules {
+            for ld in &m.linker_scripts {
+                let rel = ld
+                    .strip_prefix(&self.config.root)
+                    .unwrap_or(ld)
+                    .to_string_lossy()
+                    .to_string();
+                linker_scripts.push(rel);
+            }
+        }
+        linker_scripts.sort();
+        linker_scripts.dedup();
+        ctx.insert("linker_scripts", &linker_scripts);
+
         ctx.insert("subdirs", &subdirs);
 
         self.tera.render("root", &ctx).map_err(FbGenError::Template)
@@ -479,18 +495,6 @@ impl CMakeGenerator {
             })
             .collect();
         ctx.insert("asm_sources", &asm_sources);
-
-        // Linker scripts (relative to module path).
-        let linker_scripts: Vec<String> = module
-            .linker_scripts
-            .iter()
-            .map(|p| {
-                Self::relative_to_module(&module.path, p)
-                    .to_string_lossy()
-                    .to_string()
-            })
-            .collect();
-        ctx.insert("linker_scripts", &linker_scripts);
 
         // Include directories relative to the module.
         let include_dirs: Vec<String> = module
