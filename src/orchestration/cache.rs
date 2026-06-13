@@ -92,6 +92,7 @@ impl MetaCache {
             "generated_at": meta.config.generated_at,
             "dependency_graph": meta.dependency_graph,
             "last_sync": meta.last_sync,
+            "installed_packages_hash": meta.installed_packages_hash,
         });
 
         // Include cmake_presets if present.
@@ -232,13 +233,19 @@ impl MetaCache {
             .unwrap_or("")
             .to_string();
 
+        let installed_packages_hash = project_json
+            .get("installed_packages_hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
         Some(ProjectMeta {
             config,
             modules,
             dependency_graph,
             file_checksums,
             last_sync,
-            installed_packages_hash: String::new(),
+            installed_packages_hash,
         })
     }
 
