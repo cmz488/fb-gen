@@ -8,6 +8,7 @@ use crate::install::catalogue::Package;
 use crate::models::{FbGenError, FbGenResult};
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
 
@@ -19,6 +20,27 @@ pub struct InstalledRecord {
     pub installed_at: String,
     pub prefix_path: String,
     pub bin_path: String,
+}
+
+/// Read all installed package records from `~/.fb-gen/installed/`.
+pub fn read_installed_records(install_root: &Path) -> Vec<InstalledRecord> {
+    let installed_dir = install_root.join("installed");
+    if !installed_dir.exists() {
+        return Vec::new();
+    }
+    let mut records = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&installed_dir) {
+        for entry in entries.flatten() {
+            if entry.path().extension().map_or(false, |e| e == "json") {
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    if let Ok(record) = serde_json::from_str::<InstalledRecord>(&content) {
+                        records.push(record);
+                    }
+                }
+            }
+        }
+    }
+    records
 }
 
 /// Append a `PATH` export line to the global `~/.fb-gen/env` file.
@@ -41,7 +63,11 @@ pub fn write_env_file(
     );
 
     let existing = fs::read_to_string(&env_file).unwrap_or_default();
-    if !existing.contains(&format!("# fb-gen: {}", pkg.id)) {
+    let marker = format!("# fb-gen: {} v{}", pkg.id, pkg.version);
+    if !existing.contains(&marker) {
+        // Remove old entries for this package (different version).
+        remove_from_env(install_root, pkg.id)?;
+        let existing = fs::read_to_string(&env_file).unwrap_or_default();
         let mut new = existing;
         new.push_str(&line);
         fs::write(&env_file, &new).map_err(FbGenError::Io)?;
@@ -58,33 +84,38 @@ pub fn remove_from_env(install_root: &Path, pkg_id: &str) -> FbGenResult<()> {
     }
 
     let content = std::fs::read_to_string(&env_file).unwrap_or_default();
-    let marker = format!("# fb-gen: {}", pkg_id);
+    let prefix = format!("# fb-gen: {}", pkg_id);
 
-    // Filter out the 2-line block (comment + export) for this package.
+    // Remove all lines for this package: the comment line AND the export line.
     let lines: Vec<&str> = content.lines().collect();
     let mut out: Vec<&str> = Vec::new();
-    let mut skip = false;
-
-    for line in &lines {
-        if line.starts_with(&marker) {
-            skip = true;  // skip this line (the comment) and the next (export PATH)
-            continue;
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].starts_with(&prefix) {
+            // Skip the comment line.
+            i += 1;
+            // Skip the next line if it looks like an export (starts with "export PATH=").
+            if i < lines.len() && lines[i].starts_with("export PATH=") {
+                i += 1;
+            }
+        } else {
+            out.push(lines[i]);
+            i += 1;
         }
-        if skip {
-            // This is the export PATH line — skip it.
-            skip = false;
-            continue;
-        }
-        out.push(line);
     }
 
-    let new_content = out.join("\n");
+    // Reconstruct and write.
+    let new_content = out.join("\n").trim().to_string();
     if !new_content.is_empty() {
-        std::fs::write(&env_file, format!("{}\n", new_content)).map_err(FbGenError::Io)?;
+        let mut result = new_content;
+        result.push('\n');
+        fs::write(&env_file, &result).map_err(FbGenError::Io)?;
     } else {
-        std::fs::remove_file(&env_file).map_err(FbGenError::Io)?;
+        fs::remove_file(&env_file).or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound { Ok(()) }
+            else { Err(e) }
+        }).map_err(FbGenError::Io)?;
     }
-
     Ok(())
 }
 

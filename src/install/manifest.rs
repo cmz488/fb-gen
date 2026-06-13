@@ -111,6 +111,12 @@ pub fn fetch_manifest(url: Option<&str>) -> Option<Vec<RemotePackage>> {
 /// is reclaimed by the OS when the process exits.  This is acceptable for
 /// a one-shot CLI tool — the leaked amount is a few hundred bytes per
 /// remote package installed.
+///
+/// # Safety
+///
+/// Only safe because this is called in CLI one-shot mode — the leaked
+/// references are alive for the entire process lifetime.
+#[allow(clippy::arc_with_non_send_sync)]
 pub fn remote_to_package(rp: &RemotePackage) -> Package {
     let arch = rp.arch.as_deref().and_then(parse_arch_str);
 

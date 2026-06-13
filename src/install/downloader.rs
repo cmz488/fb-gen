@@ -8,7 +8,6 @@ use crate::install::catalogue::Package;
 use crate::models::{FbGenError, FbGenResult};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 /// Download a package archive to a temporary file.
@@ -41,17 +40,8 @@ pub fn download_package(pkg: &Package) -> FbGenResult<PathBuf> {
 
     let mut reader = response.into_body().into_reader();
     let mut file = fs::File::create(&dest).map_err(FbGenError::Io)?;
-
-    let mut buf = [0u8; 8192];
-    loop {
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| FbGenError::Config(format!("Read error: {e}")))?;
-        if n == 0 {
-            break;
-        }
-        io::Write::write_all(&mut file, &buf[..n]).map_err(FbGenError::Io)?;
-    }
+    std::io::copy(&mut reader, &mut file)
+        .map_err(|e| FbGenError::Config(format!("Download write error: {e}")))?;
 
     // Verify SHA256 (skip check when the catalogue entry uses a placeholder).
     if dl.sha256 != "TODO_REAL_SHA256" {
@@ -68,11 +58,13 @@ pub fn download_package(pkg: &Package) -> FbGenResult<PathBuf> {
     Ok(dest)
 }
 
-/// Compute the hex-encoded SHA-256 digest of a file.
+/// Compute the hex-encoded SHA-256 digest of a file using streaming I/O.
 pub fn sha256_file(path: &Path) -> FbGenResult<String> {
-    let data = fs::read(path).map_err(FbGenError::Io)?;
+    let file = fs::File::open(path).map_err(FbGenError::Io)?;
+    let mut reader = std::io::BufReader::new(file);
     let mut hasher = Sha256::new();
-    hasher.update(&data);
+    std::io::copy(&mut reader, &mut hasher)
+        .map_err(|e| FbGenError::Config(format!("Hash error: {e}")))?;
     Ok(format!("{:x}", hasher.finalize()))
 }
 

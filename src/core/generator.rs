@@ -116,7 +116,11 @@ target_sources({{ target_name }} PRIVATE ${ {{- name_upper -}}_ASM_SOURCES})
 # ── Include directories ─────────────────────────────────────────────────────
 target_include_directories({{ target_name }} PUBLIC
 {%- for d in include_dirs %}
+{%- if d is starting_with("/") or d is starting_with("${") %}
+    {{ d }}
+{%- else %}
     ${CMAKE_CURRENT_SOURCE_DIR}/{{ d }}
+{%- endif %}
 {%- endfor %}
 )
 {% endif %}
@@ -915,7 +919,18 @@ impl CMakeGenerator {
     /// fallback walks up from `module_dir` to find a common ancestor and
     /// produces a `../`-style relative path that CMake can resolve.
     fn relative_to_module(module_dir: &Path, file_path: &Path) -> PathBuf {
-        // Common case: file is inside the module directory.
+        // For absolute paths outside the project (e.g. SDK packages in ~/.fb-gen/),
+        // keep them as absolute — relative paths would be unusable.
+        if file_path.is_absolute() {
+            // Check if the file is inside the module directory.
+            if let Ok(rel) = file_path.strip_prefix(module_dir) {
+                return rel.to_path_buf();
+            }
+            // If outside the project root, keep the absolute path.
+            return file_path.to_path_buf();
+        }
+
+        // Common case: relative file path inside the module directory.
         if let Ok(rel) = file_path.strip_prefix(module_dir) {
             return rel.to_path_buf();
         }

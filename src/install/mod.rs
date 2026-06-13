@@ -39,17 +39,13 @@ fn install_package_recursive(
         )));
     }
 
-    // Already installed (in this session or on disk).
     let install_root = resolve_install_root();
     let dest_dir = install_root.join("toolchains").join(pkg.id).join(pkg.version);
-    if dest_dir.exists() || installed.contains(pkg.id) {
-        return Ok(());
-    }
 
-    // Mark as in-progress (for cycle detection).
+    // Mark as in-progress (for cycle detection) before checking deps.
     visiting.insert(pkg.id.to_string());
 
-    // Install dependencies first.
+    // Install dependencies first — always, even if this package is already installed.
     for dep_id in pkg.dependencies {
         let dep_pkg = catalogue::CATALOGUE
             .iter()
@@ -63,7 +59,14 @@ fn install_package_recursive(
         install_package_recursive(dep_pkg, installed, visiting)?;
     }
 
-    // Remove from visiting now that dependencies are done.
+    // Already installed (in this session or on disk).
+    // Checked AFTER deps so missing dependencies are still installed.
+    if dest_dir.exists() || installed.contains(pkg.id) {
+        visiting.remove(pkg.id);
+        return Ok(());
+    }
+
+    // Remove from visiting now that dependencies are done and we're about to install.
     visiting.remove(pkg.id);
 
     // Download + extract + configure.
