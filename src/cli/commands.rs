@@ -1855,6 +1855,17 @@ pub fn cmd_install(
         println!("  Available packages:");
         println!();
         for pkg in install::catalogue::CATALOGUE {
+            // Filter by kind if specified.
+            if let Some(ref k) = kind {
+                let kind_str = match pkg.kind {
+                    install::catalogue::PackageKind::Toolchain => "toolchain",
+                    install::catalogue::PackageKind::McuSdk => "sdk",
+                    install::catalogue::PackageKind::Middleware => "middleware",
+                };
+                if !kind_str.eq_ignore_ascii_case(k) {
+                    continue;
+                }
+            }
             let arch_str = pkg
                 .arch
                 .as_ref()
@@ -1905,21 +1916,38 @@ pub fn cmd_install(
 
     // ── Resolve package to install ──
     let arch_filter = arch.unwrap_or("");
+    let kind_filter = kind.map(|k| k.to_lowercase());
     let pkg = install::catalogue::CATALOGUE
         .iter()
         .find(|p| {
-            if let Some(ref a) = p.arch {
+            // Filter by arch.
+            let arch_match = if let Some(ref a) = p.arch {
                 format!("{:?}", a)
                     .to_lowercase()
                     .contains(&arch_filter.to_lowercase())
             } else {
                 false
-            }
+            };
+            // Filter by kind if specified.
+            let kind_match = if let Some(ref kf) = kind_filter {
+                let kind_str = match p.kind {
+                    install::catalogue::PackageKind::Toolchain => "toolchain",
+                    install::catalogue::PackageKind::McuSdk => "sdk",
+                    install::catalogue::PackageKind::Middleware => "middleware",
+                };
+                kind_str.contains(kf)
+            } else {
+                true
+            };
+            arch_match && kind_match
         })
         .ok_or_else(|| {
             FbGenError::Config(format!(
-                "No package found for arch '{}'. Run `fb-gen install --list`.",
-                arch_filter
+                "No package found for arch '{}'{}. Run `fb-gen install --list`.",
+                arch_filter,
+                kind_filter
+                    .map(|k| format!(" kind '{}'", k))
+                    .unwrap_or_default()
             ))
         })?;
 

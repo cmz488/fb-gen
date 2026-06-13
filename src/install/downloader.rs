@@ -4,7 +4,7 @@
 //! Archive extraction delegates to the system `tar` binary (supports
 //! `.tar.gz` and `.tar.xz`).
 
-use crate::install::catalogue::{Download, Package};
+use crate::install::catalogue::Package;
 use crate::models::{FbGenError, FbGenResult};
 use sha2::{Digest, Sha256};
 use std::fs;
