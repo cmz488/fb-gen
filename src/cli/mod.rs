@@ -95,6 +95,10 @@ pub enum Commands {
         /// Uninstall a package by ID
         #[arg(long)]
         uninstall: Option<String>,
+
+        /// Upgrade a package to the latest version
+        #[arg(long)]
+        upgrade: Option<String>,
     },
 }
 
@@ -115,7 +119,8 @@ pub fn run(cli: Cli) {
             list_installed,
             dry_run,
             uninstall,
-        } => commands::cmd_install(&cli, kind.as_deref(), arch.as_deref(), *list, *list_installed, *dry_run, uninstall.as_deref()),
+            upgrade,
+        } => commands::cmd_install(&cli, kind.as_deref(), arch.as_deref(), *list, *list_installed, *dry_run, uninstall.as_deref(), upgrade.as_deref()),
     };
 
     if let Err(e) = result {

@@ -1933,8 +1933,15 @@ pub fn cmd_install(
     list_installed: bool,
     dry_run: bool,
     uninstall: Option<&str>,
+    upgrade: Option<&str>,
 ) -> FbGenResult<()> {
     let reporter = Reporter::new(cli.quiet);
+
+    // ── --upgrade: upgrade a package ──
+    if let Some(pkg_id) = upgrade {
+        install::upgrade_package(pkg_id)?;
+        return Ok(());
+    }
 
     // ── --uninstall: remove a package ──
     if let Some(pkg_id) = uninstall {
@@ -2007,6 +2014,9 @@ pub fn cmd_install(
 
         println!("  Installed packages:");
         println!();
+
+        // Collect all installed records.
+        let mut records: Vec<install::environment::InstalledRecord> = Vec::new();
         for entry in std::fs::read_dir(&installed_dir)
             .map_err(|e| {
                 FbGenError::Config(format!("Failed to read installed dir: {e}"))
@@ -2017,16 +2027,52 @@ pub fn cmd_install(
                 let content =
                     std::fs::read_to_string(entry.path()).unwrap_or_default();
                 if let Ok(record) =
-                    serde_json::from_str::<install::environment::InstalledRecord>(&content)
+                    serde_json::from_str::<install::environment::InstalledRecord>(
+                        &content,
+                    )
                 {
-                    println!(
-                        "  {} v{} — {}",
-                        record.id, record.version, record.installed_at
-                    );
+                    records.push(record);
                 }
             }
         }
+
+        if records.is_empty() {
+            println!("  No packages installed yet.");
+            return Ok(());
+        }
+
+        // Sort by id then version.
+        records.sort_by(|a, b| {
+            a.id
+                .cmp(&b.id)
+                .then_with(|| a.version.cmp(&b.version))
+        });
+
+        for record in &records {
+            // Check if this is the current version.
+            let current_link = root
+                .join("toolchains")
+                .join(&record.id)
+                .join("current");
+            let is_current =
+                std::fs::read_link(&current_link).map_or(false, |target| {
+                    target.to_string_lossy().ends_with(&record.version)
+                });
+
+            let marker = if is_current { " *" } else { "  " };
+            println!(
+                "  {}{:30} v{:<20} {}",
+                marker, record.id, record.version, record.installed_at
+            );
+        }
         println!();
+        if records.iter().any(|r| {
+            let link = root.join("toolchains").join(&r.id).join("current");
+            std::fs::read_link(&link).is_ok()
+        }) {
+            println!("  (* = active version via 'current' symlink)");
+            println!();
+        }
         return Ok(());
     }
 
@@ -2265,6 +2311,7 @@ mod install_tests {
                 list_installed: false,
                 dry_run: false,
                 uninstall: None,
+                upgrade: None,
             },
         };
         // cmd_install with --list should not crash.

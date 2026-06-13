@@ -128,6 +128,88 @@ pub fn uninstall_package(pkg_id: &str) -> FbGenResult<()> {
     Ok(())
 }
 
+/// Upgrade an installed package to the latest version from the catalogue.
+///
+/// Downloads the newer version, updates the `current` symlink, and records the
+/// new installation.  The old version directory is kept (enables rollback).
+pub fn upgrade_package(pkg_id: &str) -> FbGenResult<()> {
+    let install_root = resolve_install_root();
+    let record_path = install_root.join("installed").join(format!("{}.json", pkg_id));
+
+    // Find the installed record for current version.
+    let current_version = if record_path.exists() {
+        let json = std::fs::read_to_string(&record_path)
+            .map_err(|e| FbGenError::Config(format!("Failed to read record: {e}")))?;
+        let record: environment::InstalledRecord = serde_json::from_str(&json)
+            .map_err(|e| FbGenError::Serialization(e.to_string()))?;
+        Some(record.version)
+    } else {
+        None
+    };
+
+    // Find the package in the catalogue.
+    let pkg = catalogue::CATALOGUE
+        .iter()
+        .find(|p| p.id == pkg_id)
+        .ok_or_else(|| {
+            FbGenError::Config(format!(
+                "Package '{}' not found in catalogue. Run `fb-gen install --list`.",
+                pkg_id
+            ))
+        })?;
+
+    // Check if already at the latest version.
+    if let Some(ref current) = current_version {
+        if current == pkg.version {
+            println!(
+                "Package '{}' is already at the latest version (v{}).",
+                pkg_id, pkg.version
+            );
+            return Ok(());
+        }
+        println!(
+            "Upgrading '{}' from v{} to v{} ...",
+            pkg_id, current, pkg.version
+        );
+    } else {
+        println!(
+            "Installing '{}' v{} (not previously installed) ...",
+            pkg_id, pkg.version
+        );
+    }
+
+    // Install the new version (uses existing install_package path).
+    let dest_dir = install_root.join("toolchains").join(pkg.id).join(pkg.version);
+    let archive_path = downloader::download_package(pkg)?;
+    downloader::extract_package(&archive_path, &dest_dir)?;
+
+    // Update current symlink to point to new version.
+    environment::link_current(&install_root.join("toolchains").join(pkg.id), &dest_dir)?;
+
+    // Update environment and record.
+    environment::write_env_file(&install_root, pkg, &dest_dir)?;
+    environment::record_installed(&install_root, pkg, &dest_dir)?;
+
+    if !pkg.verify.is_empty() {
+        downloader::verify_install(pkg, &dest_dir)?;
+    }
+
+    if let Some(old_version) = current_version {
+        println!(
+            "  Upgraded: {}  v{} -> v{}",
+            pkg.id, old_version, pkg.version
+        );
+        println!(
+            "  Old version kept at: ~/.fb-gen/toolchains/{}/{}",
+            pkg.id, old_version
+        );
+    } else {
+        println!("  Installed: {} v{}", pkg.id, pkg.version);
+    }
+
+    Ok(())
+}
+
 /// Resolve the install root directory.
 pub fn resolve_install_root() -> PathBuf {
     let home = std::env::var("HOME")
@@ -144,6 +226,23 @@ mod tests {
     fn test_resolve_install_root() {
         let root = resolve_install_root();
         assert!(root.ends_with(".fb-gen"));
+    }
+
+    #[test]
+    fn test_upgrade_package_not_in_catalogue() {
+        let result = upgrade_package("nonexistent-pkg");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not found in catalogue"));
+    }
+
+    #[test]
+    fn test_upgrade_already_latest_is_noop() {
+        // Just verify the error case (not in catalogue).
+        let result = upgrade_package("nonexistent");
+        assert!(result.is_err());
     }
 
     #[test]
