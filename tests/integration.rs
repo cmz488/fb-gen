@@ -814,10 +814,229 @@ fn test_toolchain_riscv64() {
         !content.contains("-mcpu="),
         "RISCV64 toolchain should NOT contain -mcpu= flag (empty MCU)"
     );
+    // Linker must be gcc for bare-metal RISC-V.
+    assert!(
+        content.contains("TOOLCHAIN_PREFIX}gcc"),
+        "RISCV64 toolchain should use gcc as linker (bare-metal standard)"
+    );
+    // RISC-V bare-metal linker flags per ESP-IDF.
+    assert!(
+        content.contains("-nostartfiles"),
+        "RISCV64 toolchain should have -nostartfiles linker flag"
+    );
+    assert!(
+        content.contains("--specs=nosys.specs"),
+        "RISCV64 toolchain should have --specs=nosys.specs"
+    );
     // The TARGET_FLAGS line should still exist, just with an empty value.
     assert!(
         content.contains("set(TARGET_FLAGS "),
         "RISCV64 toolchain should still have the TARGET_FLAGS variable"
+    );
+}
+
+#[test]
+fn test_toolchain_riscv32() {
+    // Verify RISCV32 generates riscv32-esp-elf- toolchain with -march/-mabi flags.
+    let tmp = TempDir::new().unwrap();
+    create_test_project(&tmp);
+
+    let root = tmp.path().to_path_buf();
+    let sources = scan_project(&root);
+
+    let discoverer = ModuleDiscoverer::new(ScanOptions {
+        exclude_dirs: vec![],
+        root: root.clone(),
+    });
+    let modules = discoverer.discover(&sources).unwrap();
+
+    let config = ProjectConfig {
+        name: "ESP32C3Test".into(),
+        version: "0.1.0".into(),
+        root: root.clone(),
+        target_arch: fb_gen::models::project::TargetArch::RISCV32,
+        toolchain: Some(fb_gen::models::project::ToolchainConfig {
+            march: "rv32imac".into(),
+            mabi: "ilp32".into(),
+            prefix: "riscv32-esp-elf-".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let generator = CMakeGenerator::new(&config).unwrap();
+    let empty_graph = DependencyGraph::new();
+    generator.generate(&modules, &empty_graph, true, &[]).unwrap();
+
+    let toolchain_path = root.join("cmake").join("toolchain.cmake");
+    assert!(toolchain_path.exists());
+
+    let content = std::fs::read_to_string(&toolchain_path).unwrap();
+    assert!(
+        content.contains("set(TOOLCHAIN_PREFIX"),
+        "RISCV32 toolchain should set TOOLCHAIN_PREFIX"
+    );
+    assert!(
+        content.contains("set(CMAKE_SYSTEM_PROCESSOR"),
+        "RISCV32 toolchain should set processor"
+    );
+    assert!(
+        content.contains("riscv32"),
+        "RISCV32 toolchain should mention riscv32"
+    );
+    assert!(
+        content.contains("-march=rv32imac"),
+        "RISCV32 toolchain should contain -march=rv32imac flag"
+    );
+    assert!(
+        content.contains("-mabi=ilp32"),
+        "RISCV32 toolchain should contain -mabi=ilp32 flag"
+    );
+    // Linker must be gcc for bare-metal RISC-V.
+    assert!(
+        content.contains("TOOLCHAIN_PREFIX}gcc"),
+        "RISCV32 toolchain should use gcc as linker (bare-metal standard)"
+    );
+    // RISC-V bare-metal linker flags per ESP-IDF.
+    assert!(
+        content.contains("-nostartfiles"),
+        "RISCV32 toolchain should have -nostartfiles linker flag (ESP-IDF standard)"
+    );
+    assert!(
+        content.contains("--specs=nosys.specs"),
+        "RISCV32 toolchain should have --specs=nosys.specs (ESP-IDF standard)"
+    );
+    // RISCV32 should NOT have ARM-specific flags.
+    assert!(
+        !content.contains("-mcpu="),
+        "RISCV32 toolchain should NOT contain ARM -mcpu= flag"
+    );
+    assert!(
+        !content.contains("--specs=nano.specs"),
+        "RISCV32 toolchain should NOT contain ARM --specs=nano.specs"
+    );
+    assert!(
+        !content.contains("-mfloat-abi="),
+        "RISCV32 toolchain should NOT contain ARM -mfloat-abi= flag"
+    );
+}
+
+#[test]
+fn test_toolchain_xtensa() {
+    // Verify Xtensa generates xtensa-esp32-elf- toolchain:
+    // - Uses gcc linker (bare-metal standard)
+    // - Built-in flags: -mlongcalls (per ESP-IDF standard)
+    // - No ARM-specific flags (--specs=nano.specs, -mcpu=)
+    let tmp = TempDir::new().unwrap();
+    create_test_project(&tmp);
+
+    let root = tmp.path().to_path_buf();
+    let sources = scan_project(&root);
+
+    let discoverer = ModuleDiscoverer::new(ScanOptions {
+        exclude_dirs: vec![],
+        root: root.clone(),
+    });
+    let modules = discoverer.discover(&sources).unwrap();
+
+    let config = ProjectConfig {
+        name: "ESP32Test".into(),
+        version: "0.1.0".into(),
+        root: root.clone(),
+        target_arch: fb_gen::models::project::TargetArch::Xtensa,
+        toolchain: Some(fb_gen::models::project::ToolchainConfig {
+            prefix: "xtensa-esp32-elf-".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let generator = CMakeGenerator::new(&config).unwrap();
+    let empty_graph = DependencyGraph::new();
+    generator.generate(&modules, &empty_graph, true, &[]).unwrap();
+
+    let toolchain_path = root.join("cmake").join("toolchain.cmake");
+    assert!(toolchain_path.exists());
+
+    let content = std::fs::read_to_string(&toolchain_path).unwrap();
+    assert!(
+        content.contains("set(TOOLCHAIN_PREFIX"),
+        "Xtensa toolchain should set TOOLCHAIN_PREFIX"
+    );
+    assert!(
+        content.contains("set(CMAKE_SYSTEM_PROCESSOR"),
+        "Xtensa toolchain should set processor"
+    );
+    assert!(
+        content.contains("xtensa"),
+        "Xtensa toolchain should mention xtensa"
+    );
+    // Built-in Xtensa flags (auto-added per ESP-IDF standard, no extra_flags needed).
+    assert!(
+        content.contains("-mlongcalls"),
+        "Xtensa toolchain should have built-in -mlongcalls flag"
+    );
+    // Xtensa bare-metal linker flag per ESP-IDF.
+    assert!(
+        content.contains("-nostdlib"),
+        "Xtensa toolchain should have -nostdlib linker flag (ESP-IDF standard)"
+    );
+    // Linker must be gcc for bare-metal, not g++.
+    assert!(
+        content.contains("set(CMAKE_LINKER"),
+        "Xtensa toolchain should set CMAKE_LINKER"
+    );
+    assert!(
+        content.contains("TOOLCHAIN_PREFIX}gcc"),
+        "Xtensa toolchain should use gcc as linker (bare-metal standard)"
+    );
+    // Xtensa should NOT have ARM-specific flags.
+    assert!(
+        !content.contains("-mcpu="),
+        "Xtensa toolchain should NOT contain ARM -mcpu= flag"
+    );
+    assert!(
+        !content.contains("--specs=nano.specs"),
+        "Xtensa toolchain should NOT contain ARM --specs=nano.specs"
+    );
+    // Xtensa should still have the TARGET_FLAGS variable.
+    assert!(
+        content.contains("set(TARGET_FLAGS "),
+        "Xtensa toolchain should still have the TARGET_FLAGS variable"
+    );
+}
+
+#[test]
+fn test_toolchain_riscv32_missing_march() {
+    // RISCV32 MUST have march specified — should return an error if empty.
+    let tmp = TempDir::new().unwrap();
+    create_test_project(&tmp);
+
+    let root = tmp.path().to_path_buf();
+    let sources = scan_project(&root);
+
+    let discoverer = ModuleDiscoverer::new(ScanOptions {
+        exclude_dirs: vec![],
+        root: root.clone(),
+    });
+    let modules = discoverer.discover(&sources).unwrap();
+
+    let config = ProjectConfig {
+        name: "Riscv32NoMarch".into(),
+        version: "0.1.0".into(),
+        root: root.clone(),
+        target_arch: fb_gen::models::project::TargetArch::RISCV32,
+        toolchain: Some(fb_gen::models::project::ToolchainConfig::default()),
+        ..Default::default()
+    };
+
+    let generator = CMakeGenerator::new(&config).unwrap();
+    let empty_graph = DependencyGraph::new();
+    let result = generator.generate(&modules, &empty_graph, true, &[]);
+
+    assert!(
+        result.is_err(),
+        "RISCV32 without -march= should return an error"
     );
 }
 
@@ -1295,4 +1514,64 @@ fn test_user_cmake_detection() {
         block.contains("add_subdirectory(Drivers)"),
         "Drivers should be listed in the USER_START block"
     );
+}
+
+#[test]
+fn test_install_list_available() {
+    // Verify --list outputs the ARM toolchain (only entry in Phase 1).
+    let mut cmd = assert_cmd::Command::cargo_bin("fb-gen").unwrap();
+    let output = cmd.arg("install").arg("--list").output().unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("arm-none-eabi-gcc"),
+        "list should show ARM toolchain"
+    );
+    assert!(stdout.contains("ARM GNU Toolchain"));
+}
+
+#[test]
+fn test_install_dry_run() {
+    // --dry-run should print a plan without network access.
+    let mut cmd = assert_cmd::Command::cargo_bin("fb-gen").unwrap();
+    let output = cmd
+        .arg("install")
+        .arg("--arch")
+        .arg("NoneEabi")
+        .arg("--dry-run")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Would download from"));
+    assert!(stdout.contains("Would install to"));
+}
+
+#[test]
+fn test_install_list_installed_empty() {
+    // --list-installed on a clean system (no installed packages).
+    let mut cmd = assert_cmd::Command::cargo_bin("fb-gen").unwrap();
+    let output = cmd.arg("install").arg("--list-installed").output().unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No packages installed yet")
+            || stdout.contains("Installed packages")
+    );
+}
+
+#[test]
+fn test_install_unknown_arch_error() {
+    let mut cmd = assert_cmd::Command::cargo_bin("fb-gen").unwrap();
+    let output = cmd
+        .arg("install")
+        .arg("--arch")
+        .arg("nonexistent-arch")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
 }
