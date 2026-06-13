@@ -689,7 +689,14 @@ fn do_incremental_sync(
     let watcher = FileWatcher::new(root, config.exclude_dirs.clone());
     let changed_paths = watcher.get_changes(&prev_meta.file_checksums);
 
-    if changed_paths.is_empty() {
+    // ── Detect installed-package changes ──
+    let current_packages_hash = compute_installed_packages_hash(root);
+    let packages_changed = current_packages_hash != prev_meta.installed_packages_hash;
+    if packages_changed {
+        reporter.report_info("Installed packages changed — will regenerate.");
+    }
+
+    if changed_paths.is_empty() && !packages_changed {
         return Ok(0);
     }
     reporter.report_info(&format!("Detected {} changed file(s)", changed_paths.len()));
@@ -758,7 +765,7 @@ fn do_incremental_sync(
     // cause infinite redetection — if we remove them here and return early,
     // they come back from the on-disk cache next time.  Instead, defer the
     // removal to *after* the early-return guard.
-    if affected_modules.is_empty() && !module_list_changed {
+    if affected_modules.is_empty() && !module_list_changed && !packages_changed {
         // Still remove orphaned checksums for deleted files that are no
         // longer tracked by any module.  Without this, the same deletion
         // is reported on every subsequent sync.
@@ -785,7 +792,11 @@ fn do_incremental_sync(
             .remove(&dp.to_string_lossy().to_string());
     }
 
-    let n_affected = affected_modules.len();
+    let n_affected = if packages_changed {
+        affected_modules.len().max(1)
+    } else {
+        affected_modules.len()
+    };
     reporter.report_info(&format!("{} module(s) affected", n_affected));
 
     // ── 3. Re-analyze dependencies only if includes changed ──
@@ -800,7 +811,13 @@ fn do_incremental_sync(
         reporter.report_info("Dependencies unchanged — skipping re-analysis.");
     }
 
-    // ── 4. Regenerate CMakeLists.txt ──
+    // ── 4. Inject installed SDK packages ──
+    let sdk_count = inject_installed_packages(&mut modules, reporter);
+    if sdk_count > 0 {
+        reporter.report_success(&format!("Injected {} installed SDK package(s)", sdk_count));
+    }
+
+    // ── 5. Regenerate CMakeLists.txt ──
     reporter.report_info("Regenerating affected CMakeLists.txt ...");
     let user_modules = scanner.scan_user_cmake_files(root, &config.exclude_dirs);
     let user_modules = filter_overlapping_user_modules(user_modules, &modules, root, reporter);
@@ -808,14 +825,14 @@ fn do_incremental_sync(
     generator.generate(&modules, &graph, true, &user_modules)?;
     reporter.report_success(&format!("{} module(s) updated", n_affected));
 
-    // ── 5. Refresh presets & toolchain file list ──
+    // ── 6. Refresh presets & toolchain file list ──
     config.cmake_presets = scanner.scan_presets(root)?;
     config.toolchain_files = scanner.scan_toolchain_files(root, &config.exclude_dirs)?;
 
-    // ── 6. Device defines: ensure fb-gen's toolchain is active ──
+    // ── 7. Device defines: ensure fb-gen's toolchain is active ──
     ensure_device_defines_preset(config, &generator, root, reporter)?;
 
-    // ── 7. Merge checksums and update prev_meta in place ──
+    // ── 8. Merge checksums and update prev_meta in place ──
     prev_meta.file_checksums.extend(new_checksums);
     prev_meta.modules = modules;
     prev_meta.dependency_graph = DependencySnapshot {
@@ -831,6 +848,8 @@ fn do_incremental_sync(
             })
             .collect(),
     };
+
+    prev_meta.installed_packages_hash = current_packages_hash;
 
     Ok(n_affected)
 }
