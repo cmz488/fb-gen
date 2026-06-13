@@ -28,6 +28,8 @@ walkdir = "2"
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
+ureq = { version = "3", features = ["gzip"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 assert_cmd = "2"
