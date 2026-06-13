@@ -1,7 +1,8 @@
-/target
-/docs
-/test
+./target
+./docs
+./test
 CLAUDE.md
 design.md
-/.codegraph
+.codegraph/
+
 
