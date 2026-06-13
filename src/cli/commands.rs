@@ -113,6 +113,78 @@ fn discoverer_opts(cli: &Cli, config: &ProjectConfig) -> crate::core::ScanOption
     crate::core::ScanOptions { root, exclude_dirs }
 }
 
+/// Scan installed SDK packages via the bridge and inject their sources into
+/// the module list.  Returns the number of SDK packages found.
+fn inject_installed_packages(
+    modules: &mut Vec<CMakeModule>,
+    reporter: &Reporter,
+) -> usize {
+    let packages = crate::install::bridge::scan_installed_packages();
+
+    if packages.is_empty() {
+        return 0;
+    }
+
+    for pkg in &packages {
+        reporter.report_info(&format!(
+            "Injecting installed SDK: {} ({} include dirs, {} source files)",
+            pkg.package_name,
+            pkg.include_dirs.len(),
+            pkg.source_files.len(),
+        ));
+
+        // Inject into the first executable module (or root if none).
+        let target_idx = modules
+            .iter()
+            .position(|m| m.has_main)
+            .or_else(|| modules.iter().position(|m| m.is_root))
+            .unwrap_or(0);
+
+        let target = if target_idx < modules.len() {
+            Some(&mut modules[target_idx])
+        } else {
+            None
+        };
+
+        if let Some(module) = target {
+            // Add include directories.
+            for inc_dir in &pkg.include_dirs {
+                if !module.include_dirs.contains(inc_dir) {
+                    module.include_dirs.push(inc_dir.clone());
+                }
+            }
+
+            // Add compile definitions.
+            for def in &pkg.compile_defines {
+                if !module.compile_definitions.contains(def) {
+                    module.compile_definitions.push(def.clone());
+                }
+            }
+
+            // Convert source files to synthetic SourceFile entries.
+            for src_path in &pkg.source_files {
+                let sf = SourceFile {
+                    path: src_path.clone(),
+                    relative_path: src_path.clone(),
+                    file_name: src_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    source_type: crate::models::module::SourceType::from_extension(
+                        src_path.extension().unwrap_or_default().to_str().unwrap_or("c"),
+                    ),
+                    includes: Vec::new(),
+                    size_bytes: 0,
+                };
+                module.sources.push(sf);
+            }
+        }
+    }
+
+    packages.len()
+}
+
 /// Run the full scan → discover → analyze pipeline. Returns modules + optional dep graph.
 fn scan_and_discover(
     cli: &Cli,
@@ -278,7 +350,13 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>) -> FbGenResult<()> {
 
     // ── Pipeline ──
     let start = Instant::now();
-    let (modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
+    let (mut modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
+
+    // ── Inject installed SDK packages ──
+    let sdk_count = inject_installed_packages(&mut modules, &reporter);
+    if sdk_count > 0 {
+        reporter.report_success(&format!("Injected {} installed SDK package(s)", sdk_count));
+    }
 
     // ── Generate ──
     reporter.report_info("Generating CMakeLists.txt files ...");
@@ -1287,7 +1365,14 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
     if !root_cmake.exists() {
         // First time: full generation.
         reporter.report_info("No CMakeLists.txt found — generating ...");
-        let (modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
+        let (mut modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
+
+        // ── Inject installed SDK packages ──
+        let sdk_count = inject_installed_packages(&mut modules, &reporter);
+        if sdk_count > 0 {
+            reporter.report_success(&format!("Injected {} installed SDK package(s)", sdk_count));
+        }
+
         let generator = CMakeGenerator::new(&config)?;
         let empty_graph = DependencyGraph::new();
         let ref_graph = graph.as_ref().unwrap_or(&empty_graph);
