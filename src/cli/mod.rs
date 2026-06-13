@@ -91,6 +91,10 @@ pub enum Commands {
         /// Dry run — show what would be installed without downloading
         #[arg(long)]
         dry_run: bool,
+
+        /// Uninstall a package by ID
+        #[arg(long)]
+        uninstall: Option<String>,
     },
 }
 
@@ -110,7 +114,8 @@ pub fn run(cli: Cli) {
             list,
             list_installed,
             dry_run,
-        } => commands::cmd_install(&cli, kind.as_deref(), arch.as_deref(), *list, *list_installed, *dry_run),
+            uninstall,
+        } => commands::cmd_install(&cli, kind.as_deref(), arch.as_deref(), *list, *list_installed, *dry_run, uninstall.as_deref()),
     };
 
     if let Err(e) = result {

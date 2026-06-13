@@ -9,7 +9,7 @@ pub mod catalogue;
 pub mod downloader;
 pub mod environment;
 
-use crate::models::FbGenResult;
+use crate::models::{FbGenError, FbGenResult};
 use catalogue::Package;
 use std::path::PathBuf;
 
@@ -31,6 +31,53 @@ pub fn install_package(pkg: &Package) -> FbGenResult<()> {
     environment::record_installed(&install_root, pkg, &dest_dir)?;
     downloader::verify_install(pkg, &dest_dir)?;
 
+    Ok(())
+}
+
+/// Uninstall a previously installed package.
+///
+/// Removes the version directory, the `current` symlink (if it points
+/// to this version), the installed record JSON, and the PATH line from
+/// the env file.
+pub fn uninstall_package(pkg_id: &str) -> FbGenResult<()> {
+    let install_root = resolve_install_root();
+    let record_path = install_root.join("installed").join(format!("{}.json", pkg_id));
+
+    // Read the installed record to find paths.
+    if !record_path.exists() {
+        println!("Package '{}' is not installed.", pkg_id);
+        return Ok(());
+    }
+
+    let json = std::fs::read_to_string(&record_path)
+        .map_err(|e| FbGenError::Config(format!("Failed to read record: {e}")))?;
+    let record: environment::InstalledRecord = serde_json::from_str(&json)
+        .map_err(|e| FbGenError::Serialization(e.to_string()))?;
+
+    // Remove the version directory.
+    let version_dir = std::path::PathBuf::from(&record.prefix_path);
+    if version_dir.exists() {
+        std::fs::remove_dir_all(&version_dir)
+            .map_err(|e| FbGenError::Config(format!("Failed to remove {}: {e}", version_dir.display())))?;
+        println!("  Removed: {}", version_dir.display());
+    }
+
+    // Remove the `current` symlink if it points to this version.
+    let current_link = version_dir.parent().map(|p| p.join("current"));
+    if let Some(ref link) = current_link {
+        if link.is_symlink() || link.exists() {
+            let _ = std::fs::remove_file(link);
+        }
+    }
+
+    // Remove PATH line from env file.
+    environment::remove_from_env(&install_root, pkg_id)?;
+
+    // Remove the installed record.
+    std::fs::remove_file(&record_path)
+        .map_err(|e| FbGenError::Config(format!("Failed to remove record: {e}")))?;
+
+    println!("  Uninstalled: {} v{}", record.id, record.version);
     Ok(())
 }
 

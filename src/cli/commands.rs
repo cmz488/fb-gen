@@ -1847,8 +1847,15 @@ pub fn cmd_install(
     list: bool,
     list_installed: bool,
     dry_run: bool,
+    uninstall: Option<&str>,
 ) -> FbGenResult<()> {
     let reporter = Reporter::new(cli.quiet);
+
+    // ── --uninstall: remove a package ──
+    if let Some(pkg_id) = uninstall {
+        install::uninstall_package(pkg_id)?;
+        return Ok(());
+    }
 
     // ── --list: show available packages ──
     if list {
@@ -2107,6 +2114,7 @@ mod install_tests {
                 list: true,
                 list_installed: false,
                 dry_run: false,
+                uninstall: None,
             },
         };
         // cmd_install with --list should not crash.

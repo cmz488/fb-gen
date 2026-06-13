@@ -50,6 +50,44 @@ pub fn write_env_file(
     Ok(())
 }
 
+/// Remove the PATH line for a given package ID from the env file.
+pub fn remove_from_env(install_root: &Path, pkg_id: &str) -> FbGenResult<()> {
+    let env_file = install_root.join("env");
+    if !env_file.exists() {
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(&env_file).unwrap_or_default();
+    let marker = format!("# fb-gen: {}", pkg_id);
+
+    // Filter out the 2-line block (comment + export) for this package.
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out: Vec<&str> = Vec::new();
+    let mut skip = false;
+
+    for line in &lines {
+        if line.starts_with(&marker) {
+            skip = true;  // skip this line (the comment) and the next (export PATH)
+            continue;
+        }
+        if skip {
+            // This is the export PATH line — skip it.
+            skip = false;
+            continue;
+        }
+        out.push(line);
+    }
+
+    let new_content = out.join("\n");
+    if !new_content.is_empty() {
+        std::fs::write(&env_file, format!("{}\n", new_content)).map_err(FbGenError::Io)?;
+    } else {
+        std::fs::remove_file(&env_file).map_err(FbGenError::Io)?;
+    }
+
+    Ok(())
+}
+
 /// Create (or replace) a `current` symlink pointing to the given version
 /// directory so that `…/toolchains/arm-none-eabi/current/bin/` always
 /// resolves to the active version.
@@ -178,5 +216,27 @@ mod tests {
         let record: InstalledRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(record.id, "test-toolchain");
         assert_eq!(record.version, "0.1.0");
+    }
+
+    #[test]
+    fn test_remove_from_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join(".fb-gen");
+        let env_file = install_root.join("env");
+
+        // Write two package entries.
+        fs::create_dir_all(&install_root).unwrap();
+        fs::write(
+            &env_file,
+            "# fb-gen: toolchain-a v1.0\nexport PATH=\"/path/to/a/bin:$PATH\"\n\
+             # fb-gen: toolchain-b v2.0\nexport PATH=\"/path/to/b/bin:$PATH\"\n",
+        ).unwrap();
+
+        // Remove toolchain-a.
+        remove_from_env(&install_root, "toolchain-a").unwrap();
+
+        let content = fs::read_to_string(&env_file).unwrap();
+        assert!(!content.contains("toolchain-a"), "toolchain-a should be removed");
+        assert!(content.contains("toolchain-b"), "toolchain-b should remain");
     }
 }
