@@ -1973,12 +1973,14 @@ pub fn cmd_install(
     // ── --upgrade: upgrade a package ──
     if let Some(pkg_id) = upgrade {
         install::upgrade_package(pkg_id)?;
+        crate::install::bridge::write_installed_packages_marker(&cli.root);
         return Ok(());
     }
 
     // ── --uninstall: remove a package ──
     if let Some(pkg_id) = uninstall {
         install::uninstall_package(pkg_id)?;
+        crate::install::bridge::write_installed_packages_marker(&cli.root);
         return Ok(());
     }
 
@@ -2184,6 +2186,8 @@ pub fn cmd_install(
 
     // ── Execute install ──
     install::install_package(pkg)?;
+
+    crate::install::bridge::write_installed_packages_marker(&cli.root);
 
     reporter.report_success(&format!("Installed {} v{}", pkg.id, pkg.version));
     println!();
