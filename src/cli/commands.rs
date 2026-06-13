@@ -3,7 +3,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 use std::time::Instant;
+
+use regex::Regex;
 
 use crate::cli::Cli;
 use crate::core::{CMakeGenerator, DependencyAnalyzer, ModuleDiscoverer};
@@ -13,8 +16,27 @@ use crate::models::{
     BuildBackend, CMakeModule, DependencySnapshot, FbGenError, FbGenResult, ProjectConfig,
     ProjectMeta,
 };
+use serde_json;
 use crate::orchestration::{FileWatcher, MetaCache, Reporter, UserQuery};
 use crate::scanner::{self, FffScanner};
+
+// ── static regexes ──────────────────────────────────────────────────────────
+
+/// Regex for extracting source-file paths from CMakeLists.txt content.
+/// Matches relative paths like `../../Core/Src/main.c` (the CubeMX convention)
+/// and also bare relative paths like `Core/Src/main.c` or paths prefixed with
+/// CMake variables like `${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/main.c`.
+static CMAKE_SOURCE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?:(?:\.\./)+|(?:[a-zA-Z0-9_/.+-]+/)*[a-zA-Z0-9_/.+-]+)\.(?:c|cpp|cc|cxx|s|S)\b"#,
+    )
+    .expect("CMAKE_SOURCE_PATH_RE regex")
+});
+
+/// Regex for detecting `main()` function signatures in source files.
+static MAIN_FUNCTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:int|void)\s+main\s*\(").expect("MAIN_FUNCTION_RE regex")
+});
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -135,6 +157,10 @@ fn scan_and_discover(
 
     // ── Detect user-defined CMakeLists ──
     let user_modules = scanner.scan_user_cmake_files(&config.root, &config.exclude_dirs);
+
+    // Filter out user modules whose source files overlap with fb-gen's
+    // own modules (e.g. CubeMX cmake files that compile the same .c files).
+    let user_modules = filter_overlapping_user_modules(user_modules, &modules, &config.root, reporter);
     if !user_modules.is_empty() {
         reporter.report_info(&format!(
             "Found {} user-defined CMake module(s)",
@@ -204,6 +230,9 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>) -> FbGenResult<()> {
         ));
     }
 
+    // ── Device defines: switch presets to fb-gen's toolchain ────────
+    ensure_device_defines_preset(&mut config, &generator, &root, &reporter)?;
+
     // ── Cache ──
     save_meta_cache(&root, &modules, graph.as_ref(), &config)?;
     reporter.report_info("Metadata cached to .fb-gen/cache/");
@@ -227,6 +256,9 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>) -> FbGenResult<()> {
 ///
 /// Instead of a full re-scan, this uses `ProjectMeta` from `.fb-gen/cache/`
 /// to detect exactly which files changed, then only re-processes affected modules.
+///
+/// With `--watch`, enters a polling loop that automatically re-syncs whenever
+/// source files change (ctrl+c to stop).
 pub fn cmd_sync(cli: &Cli) -> FbGenResult<()> {
     let reporter = Reporter::new(cli.quiet);
     let root = resolve_root(cli)?;
@@ -241,23 +273,242 @@ pub fn cmd_sync(cli: &Cli) -> FbGenResult<()> {
         .load()
         .ok_or_else(|| FbGenError::Config("Failed to load cached metadata".into()))?;
 
-    let config = prev_meta.config.clone();
+    let mut config = prev_meta.config.clone();
 
+    // ── Initial sync ────────────────────────────────────────────────────
+    let start = Instant::now();
+    let n_affected = do_incremental_sync(&root, &mut config, &mut prev_meta, &reporter)?;
+
+    if n_affected > 0 {
+        save_sync_result(&cache, &config, &prev_meta)?;
+        let elapsed = start.elapsed();
+        reporter.report_success(&format!(
+            "Sync done in {:.1}s — {} module(s) updated",
+            elapsed.as_secs_f64(),
+            n_affected
+        ));
+    } else {
+        reporter.report_success("No changes detected — everything up to date.");
+    }
+
+    // ── Watch loop ──────────────────────────────────────────────────────
+    if !cli.watch {
+        return Ok(());
+    }
+
+    reporter.report_info("Watching for file changes (ctrl+c to stop) ...");
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Re-load cached metadata (the previous iteration may have updated it).
+        let mut prev_meta = match cache.load() {
+            Some(m) => m,
+            None => {
+                reporter.report_warning("Failed to reload cached metadata — retrying ...");
+                continue;
+            }
+        };
+        let mut config = prev_meta.config.clone();
+
+        // Quick check: are there any file changes?
+        let watcher = FileWatcher::new(&root, config.exclude_dirs.clone());
+        let changed = watcher.get_changes(&prev_meta.file_checksums);
+
+        if changed.is_empty() {
+            continue;
+        }
+
+        reporter.report_info(&format!(
+            "{} file(s) changed — syncing ...",
+            changed.len()
+        ));
+
+        match do_incremental_sync(&root, &mut config, &mut prev_meta, &reporter) {
+            Ok(n) if n > 0 => {
+                if let Err(e) = save_sync_result(&cache, &config, &prev_meta) {
+                    reporter.report_warning(&format!("Failed to save metadata: {e}"));
+                } else {
+                    reporter.report_success(&format!("{} module(s) updated", n));
+                }
+            }
+            Ok(_) => {
+                // No modules affected (checksum-only changes like orphan cleanups).
+                let _ = save_sync_result(&cache, &config, &prev_meta);
+            }
+            Err(e) => {
+                reporter.report_warning(&format!("Sync error (will retry): {e}"));
+            }
+        }
+    }
+}
+
+/// Persist sync results to the metadata cache.
+fn save_sync_result(
+    cache: &MetaCache,
+    config: &ProjectConfig,
+    prev_meta: &ProjectMeta,
+) -> FbGenResult<()> {
+    let dep_snapshot = DependencySnapshot {
+        nodes: prev_meta.modules.iter().map(|m| m.name.clone()).collect(),
+        edges: prev_meta
+            .modules
+            .iter()
+            .flat_map(|m| {
+                rebuild_graph_from_snapshot(&prev_meta.dependency_graph)
+                    .get_dependencies(&m.name)
+                    .into_iter()
+                    .map(|(dep_name, _)| (m.name.clone(), dep_name))
+            })
+            .collect(),
+    };
+
+    let meta = ProjectMeta {
+        config: config.clone(),
+        modules: prev_meta.modules.clone(),
+        dependency_graph: dep_snapshot,
+        file_checksums: prev_meta.file_checksums.clone(),
+        last_sync: chrono::Utc::now().to_rfc3339(),
+    };
+    cache.save(&meta)
+}
+
+// ── compile_commands.json helpers (LSP support) ────────────────────────────
+
+/// Run cmake configure to produce `compile_commands.json`, then symlink it
+/// into the project root so LSP tools (clangd, ccls) find it automatically.
+///
+/// Failures are reported as warnings — they never block the primary command.
+fn generate_compile_commands(
+    root: &Path,
+    build_dir: &Path,
+    config: &ProjectConfig,
+    reporter: &Reporter,
+) {
+    // Ensure build directory exists.
+    if let Err(e) = std::fs::create_dir_all(build_dir) {
+        reporter.report_warning(&format!(
+            "Cannot create build dir for compile_commands.json: {e}"
+        ));
+        return;
+    }
+
+    // Assemble cmake args: same flags as cmd_run uses for configure.
+    let gen_flags = cmake_generator_flag(config);
+    let toolchain_args = cmake_toolchain_args(config);
+
+    let mut cmd = Command::new("cmake");
+    cmd.arg("-S").arg(root).arg("-B").arg(build_dir);
+    for f in &gen_flags {
+        cmd.arg(f);
+    }
+    for f in &toolchain_args {
+        cmd.arg(f);
+    }
+    cmd.arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
+
+    reporter.report_info(&format!(
+        "Running cmake configure for compile_commands.json (--lsp) ..."
+    ));
+
+    match cmd.output() {
+        Ok(output) if output.status.success() => {
+            let cc_json = build_dir.join("compile_commands.json");
+            if !cc_json.exists() {
+                reporter.report_warning(
+                    "cmake succeeded but compile_commands.json was not produced."
+                );
+                return;
+            }
+            // Create / refresh symlink in project root.
+            let link_path = root.join("compile_commands.json");
+            match symlink_or_copy(&cc_json, &link_path) {
+                Ok(()) => reporter.report_success("compile_commands.json → project root"),
+                Err(e) => reporter.report_warning(&format!(
+                    "compile_commands.json generated but symlink failed: {e}"
+                )),
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            reporter.report_warning(&format!(
+                "cmake configure for --lsp failed (command succeeded, check toolchain):\n{}",
+                stderr
+            ));
+        }
+        Err(e) => {
+            reporter.report_warning(&format!(
+                "Cannot run cmake for --lsp (is cmake installed?): {e}"
+            ));
+        }
+    }
+}
+
+/// Create a symlink at `link` pointing to `target`.  On Windows where
+/// symlinks require elevated privileges, copy the file instead.
+fn symlink_or_copy(target: &Path, link: &Path) -> std::io::Result<()> {
+    // Remove existing link / file if present.
+    if link.exists() {
+        // If it's already a symlink pointing to the right target, we're done.
+        if link.is_symlink() {
+            if let Ok(existing) = std::fs::read_link(link) {
+                if existing == target {
+                    return Ok(());
+                }
+            }
+        }
+        std::fs::remove_file(link)?;
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                // Fall back to copy on permission-denied (common without
+                // developer mode on Windows).
+                std::fs::copy(target, link)?;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        // Generic fallback: copy.
+        std::fs::copy(target, link)?;
+        Ok(())
+    }
+}
+
+// ── shared incremental sync core ──────────────────────────────────────────
+
+/// Run the incremental sync pipeline against `prev_meta` and update it in
+/// place.  Returns the number of affected modules (0 means nothing changed).
+///
+/// This is the shared implementation used by both `cmd_sync` and `cmd_run`.
+fn do_incremental_sync(
+    root: &Path,
+    config: &mut ProjectConfig,
+    prev_meta: &mut ProjectMeta,
+    reporter: &Reporter,
+) -> FbGenResult<usize> {
     // ── 1. Detect changes via checksum comparison ──
-    reporter.report_info("Checking for file changes ...");
-    let watcher = FileWatcher::new(&root, config.exclude_dirs.clone());
+    let watcher = FileWatcher::new(root, config.exclude_dirs.clone());
     let changed_paths = watcher.get_changes(&prev_meta.file_checksums);
 
     if changed_paths.is_empty() {
-        reporter.report_success("No changes detected — everything up to date.");
-        return Ok(());
+        return Ok(0);
     }
     reporter.report_info(&format!("Detected {} changed file(s)", changed_paths.len()));
 
-    let start = Instant::now();
-
     // ── 2. Classify changes: added / modified / deleted ──
-    let scanner = FffScanner::new(&root);
+    let scanner = FffScanner::new(root);
+    let cache = MetaCache::new(root);
     let mut modules = prev_meta.modules.clone();
     let mut includes_changed = false;
     let mut affected_modules: HashSet<String> = HashSet::new();
@@ -286,7 +537,7 @@ pub fn cmd_sync(cli: &Cli) -> FbGenResult<()> {
             };
 
             // Track checksum
-            let hash = cache.compute_checksums(&[path.clone()]);
+            let hash = cache.compute_checksums(std::slice::from_ref(path));
             new_checksums.extend(hash);
 
             if existed_before {
@@ -305,7 +556,7 @@ pub fn cmd_sync(cli: &Cli) -> FbGenResult<()> {
                 add_file_to_modules(
                     &mut modules,
                     sf,
-                    &root,
+                    root,
                     &config.exclude_dirs,
                     &mut affected_modules,
                     &mut module_list_changed,
@@ -314,16 +565,36 @@ pub fn cmd_sync(cli: &Cli) -> FbGenResult<()> {
         }
     }
 
-    // Remove deleted paths from checksums
+    // Remove deleted paths from checksums (only when we're going to save).
+    // Do this BEFORE the early-return check so orphaned checksums don't
+    // cause infinite redetection — if we remove them here and return early,
+    // they come back from the on-disk cache next time.  Instead, defer the
+    // removal to *after* the early-return guard.
+    if affected_modules.is_empty() && !module_list_changed {
+        // Still remove orphaned checksums for deleted files that are no
+        // longer tracked by any module.  Without this, the same deletion
+        // is reported on every subsequent sync.
+        let mut orphaned_removed = false;
+        for dp in &deleted_paths {
+            let key = dp.to_string_lossy().to_string();
+            if prev_meta.file_checksums.remove(&key).is_some() {
+                orphaned_removed = true;
+            }
+        }
+        if orphaned_removed {
+            // We mutated prev_meta — caller must persist.
+            reporter.report_info("Cleaned up orphaned checksums for deleted files.");
+            return Ok(0);
+        }
+        reporter.report_info("No modules affected by changes — skipping generation.");
+        return Ok(0);
+    }
+
+    // Now it's safe to remove deleted checksums.
     for dp in &deleted_paths {
         prev_meta
             .file_checksums
             .remove(&dp.to_string_lossy().to_string());
-    }
-
-    if affected_modules.is_empty() && !module_list_changed {
-        reporter.report_success("No modules affected by changes — skipping generation.");
-        return Ok(());
     }
 
     let n_affected = affected_modules.len();
@@ -342,21 +613,27 @@ pub fn cmd_sync(cli: &Cli) -> FbGenResult<()> {
     }
 
     // ── 4. Regenerate CMakeLists.txt ──
-    // Always pass all modules so the root CMakeLists.txt has the full subdirs list.
-    // The generator's diff-check skips files whose content hasn't changed,
-    // so only genuinely affected files are re-written.
     reporter.report_info("Regenerating affected CMakeLists.txt ...");
-    let user_modules = scanner.scan_user_cmake_files(&root, &config.exclude_dirs);
-    let generator = CMakeGenerator::new(&config)?;
+    let user_modules = scanner.scan_user_cmake_files(root, &config.exclude_dirs);
+    let user_modules = filter_overlapping_user_modules(user_modules, &modules, root, reporter);
+    let generator = CMakeGenerator::new(config)?;
     generator.generate(&modules, &graph, false, &user_modules)?;
     reporter.report_success(&format!("{} module(s) updated", n_affected));
 
-    // ── 5. Merge checksums and save updated meta ──
-    prev_meta.file_checksums.extend(new_checksums);
+    // ── 5. Refresh presets & toolchain file list ──
+    config.cmake_presets = scanner.scan_presets(root)?;
+    config.toolchain_files = scanner.scan_toolchain_files(root, &config.exclude_dirs)?;
 
-    let dep_snapshot = DependencySnapshot {
-        nodes: modules.iter().map(|m| m.name.clone()).collect(),
-        edges: modules
+    // ── 6. Device defines: ensure fb-gen's toolchain is active ──
+    ensure_device_defines_preset(config, &generator, root, reporter)?;
+
+    // ── 7. Merge checksums and update prev_meta in place ──
+    prev_meta.file_checksums.extend(new_checksums);
+    prev_meta.modules = modules;
+    prev_meta.dependency_graph = DependencySnapshot {
+        nodes: prev_meta.modules.iter().map(|m| m.name.clone()).collect(),
+        edges: prev_meta
+            .modules
             .iter()
             .flat_map(|m| {
                 graph
@@ -367,21 +644,54 @@ pub fn cmd_sync(cli: &Cli) -> FbGenResult<()> {
             .collect(),
     };
 
-    let meta = ProjectMeta {
-        config,
-        modules,
-        dependency_graph: dep_snapshot,
-        file_checksums: prev_meta.file_checksums,
-        last_sync: chrono::Utc::now().to_rfc3339(),
-    };
-    cache.save(&meta)?;
+    Ok(n_affected)
+}
 
-    let elapsed = start.elapsed();
-    reporter.report_success(&format!(
-        "Sync done in {:.1}s — {} module(s) updated",
-        elapsed.as_secs_f64(),
-        n_affected
-    ));
+/// When device defines are configured in the toolchain config, switch every
+/// configure preset's `toolchainFile` to fb-gen's own `cmake/toolchain.cmake`
+/// and force-generate that file (so the defines are baked into TARGET_FLAGS).
+/// Persists the updated `CMakePresets.json` to disk.
+fn ensure_device_defines_preset(
+    config: &mut ProjectConfig,
+    generator: &CMakeGenerator,
+    root: &Path,
+    reporter: &Reporter,
+) -> FbGenResult<()> {
+    let has_device_defines = config
+        .toolchain
+        .as_ref()
+        .is_some_and(|tc| !tc.device_defines.is_empty());
+    if !has_device_defines {
+        return Ok(());
+    }
+
+    if let Some(ref mut presets) = config.cmake_presets {
+        let mut switched = false;
+        for cp in &mut presets.configure_presets {
+            if cp.toolchain_file.is_some() {
+                cp.toolchain_file = Some("${sourceDir}/cmake/toolchain.cmake".into());
+                switched = true;
+            }
+        }
+        if switched {
+            generator.force_generate_toolchain()?;
+            reporter.report_info(
+                "Toolchain preset switched to fb-gen toolchain.cmake (device defines configured)",
+            );
+
+            // Persist CMakePresets.json for IDE / cmake --preset consumers.
+            let presets_path = root.join("CMakePresets.json");
+            if let Ok(json) = serde_json::to_string_pretty(presets) {
+                if let Err(e) = std::fs::write(&presets_path, json) {
+                    reporter.report_warning(&format!(
+                        "Failed to write updated CMakePresets.json: {}. \
+                         Run `fb-gen init` again or update the file manually.",
+                        e
+                    ));
+                }
+            }
+        }
+    }
 
     Ok(())
 }
@@ -425,17 +735,34 @@ fn update_file_in_modules(
     affected: &mut HashSet<String>,
 ) {
     for m in modules.iter_mut() {
+        // Search all containers; linker scripts are PathBuf (not SourceFile)
+        // so a content change to a .ld file has no in-memory SourceFile to
+        // update — the path itself didn't change.  Mark the module affected
+        // anyway so the CMakeLists.txt is regenerated.
         let found = if new_sf.source_type.is_source() {
             m.sources.iter().position(|sf| sf.path == new_sf.path)
-        } else {
+        } else if new_sf.source_type.is_header() {
             m.headers.iter().position(|sf| sf.path == new_sf.path)
+        } else if new_sf.source_type.is_asm() {
+            m.asm_sources.iter().position(|sf| sf.path == new_sf.path)
+        } else if new_sf.source_type.is_linker() {
+            // Linker script: just mark affected and return.
+            if m.linker_scripts.iter().any(|p| p == &new_sf.path) {
+                affected.insert(m.name.clone());
+                return;
+            }
+            None
+        } else {
+            None
         };
 
         if let Some(pos) = found {
             if new_sf.source_type.is_source() {
                 m.sources[pos] = new_sf;
-            } else {
+            } else if new_sf.source_type.is_header() {
                 m.headers[pos] = new_sf;
+            } else if new_sf.source_type.is_asm() {
+                m.asm_sources[pos] = new_sf;
             }
             affected.insert(m.name.clone());
             return;
@@ -469,9 +796,23 @@ fn add_file_to_modules(
     if let Some(m) = modules.iter_mut().find(|m| m.relative_path == parent_buf) {
         if sf.source_type.is_source() {
             m.sources.push(sf);
-        } else {
+            // If the newly-added source contains main(), promote the module
+            // to Executable (e.g. user added main.c to an existing library).
+            if !m.has_main && source_has_main(m.sources.last().unwrap()) {
+                m.has_main = true;
+                m.target_type = crate::models::module::TargetType::Executable;
+            }
+        } else if sf.source_type.is_header() {
             m.headers.push(sf);
+        } else if sf.source_type.is_asm() {
+            m.asm_sources.push(sf);
+        } else if sf.source_type.is_linker() {
+            // Linker scripts are tracked as PathBuf, not SourceFile.
+            m.linker_scripts.push(sf.path.clone());
         }
+        // Note: SourceType::Other files are intentionally skipped — they
+        // represent unrecognised extensions that the scanner included in
+        // the file list but that have no meaningful role in a CMake module.
         affected.insert(m.name.clone());
     } else {
         // Create a new module for this directory.
@@ -503,8 +844,12 @@ fn add_file_to_modules(
 
         if sf.source_type.is_source() {
             new_module.sources.push(sf);
-        } else {
+        } else if sf.source_type.is_header() {
             new_module.headers.push(sf);
+        } else if sf.source_type.is_asm() {
+            new_module.asm_sources.push(sf);
+        } else if sf.source_type.is_linker() {
+            new_module.linker_scripts.push(sf.path.clone());
         }
 
         modules.push(new_module);
@@ -524,16 +869,28 @@ fn remove_file_from_modules(
         let m = &mut modules[i];
         let old_src_len = m.sources.len();
         let old_hdr_len = m.headers.len();
+        let old_asm_len = m.asm_sources.len();
+        let old_ld_len = m.linker_scripts.len();
 
         m.sources.retain(|sf| sf.path != path);
         m.headers.retain(|sf| sf.path != path);
+        m.asm_sources.retain(|sf| sf.path != path);
+        m.linker_scripts.retain(|p| p != path);
 
-        if m.sources.len() != old_src_len || m.headers.len() != old_hdr_len {
+        if m.sources.len() != old_src_len
+            || m.headers.len() != old_hdr_len
+            || m.asm_sources.len() != old_asm_len
+            || m.linker_scripts.len() != old_ld_len
+        {
             affected.insert(m.name.clone());
         }
 
-        // Remove module if it became empty.
-        if m.sources.is_empty() && m.headers.is_empty() {
+        // Remove module if it became empty (check all containers).
+        if m.sources.is_empty()
+            && m.headers.is_empty()
+            && m.asm_sources.is_empty()
+            && m.linker_scripts.is_empty()
+        {
             modules.remove(i);
             *list_changed = true;
         }
@@ -543,9 +900,7 @@ fn remove_file_from_modules(
 /// Quick check if a SourceFile contains a main() function.
 fn source_has_main(sf: &SourceFile) -> bool {
     if let Ok(content) = std::fs::read_to_string(&sf.path) {
-        regex::Regex::new(r"(?:int|void)\s+main\s*\(")
-            .map(|re| re.is_match(&content))
-            .unwrap_or(false)
+        MAIN_FUNCTION_RE.is_match(&content)
     } else {
         false
     }
@@ -582,7 +937,9 @@ fn save_meta_cache(
             m.sources
                 .iter()
                 .chain(m.headers.iter())
+                .chain(m.asm_sources.iter())
                 .map(|sf| sf.path.clone())
+                .chain(m.linker_scripts.iter().cloned())
         })
         .collect();
     let checksums = cache.compute_checksums(&all_paths);
@@ -621,17 +978,22 @@ pub fn cmd_check(cli: &Cli) -> FbGenResult<()> {
     let reporter = Reporter::new(cli.quiet);
     let root = resolve_root(cli)?;
 
-    // Build a minimal config with standard exclusions.
-    let config = ProjectConfig {
-        name: root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("project")
-            .to_string(),
-        root: root.clone(),
-        exclude_dirs: vec!["build".into(), ".git".into(), "third_party".into()],
-        ..Default::default()
-    };
+    // Load config from cache when available so the generated output matches
+    // what `init` / `sync` produce (language, standards, architecture, …).
+    // Fall back to a minimal config if no cache exists.
+    let config = MetaCache::new(&root)
+        .load()
+        .map(|m| m.config)
+        .unwrap_or_else(|| ProjectConfig {
+            name: root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project")
+                .to_string(),
+            root: root.clone(),
+            exclude_dirs: vec!["build".into(), ".git".into(), "third_party".into()],
+            ..Default::default()
+        });
 
     let (modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
 
@@ -692,6 +1054,15 @@ pub fn cmd_validate(cli: &Cli) -> FbGenResult<()> {
 
     let config = load_or_default_config(&root, &cli.output);
     let gen_flags = cmake_generator_flag(&config);
+    let toolchain_args = cmake_toolchain_args(&config);
+
+    // If cross-compiling, nuke stale cache so the toolchain file is honoured.
+    if !toolchain_args.is_empty() {
+        let cache_file = build_dir.join("CMakeCache.txt");
+        if cache_file.exists() {
+            std::fs::remove_file(&cache_file).ok();
+        }
+    }
 
     let gen_str = if gen_flags.is_empty() {
         String::new()
@@ -710,7 +1081,6 @@ pub fn cmd_validate(cli: &Cli) -> FbGenResult<()> {
     for f in &gen_flags {
         cmd.arg(f);
     }
-    let toolchain_args = cmake_toolchain_args(&config);
     for f in &toolchain_args {
         cmd.arg(f);
     }
@@ -752,7 +1122,7 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
         ..Default::default()
     };
 
-    let config = if cache.exists() {
+    let mut config = if cache.exists() {
         cache
             .load()
             .map(|m| m.config)
@@ -763,9 +1133,10 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
 
     let gen_flags = cmake_generator_flag(&config);
 
-    // Generate if no CMakeLists.txt exists.
+    // Ensure CMakeLists.txt are up to date.
     let root_cmake = root.join("CMakeLists.txt");
     if !root_cmake.exists() {
+        // First time: full generation.
         reporter.report_info("No CMakeLists.txt found — generating ...");
         let (modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
         let generator = CMakeGenerator::new(&config)?;
@@ -774,11 +1145,84 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
         generator.generate(&modules, ref_graph, false, &user_modules)?;
         // Save cache for future incremental syncs.
         save_meta_cache(&root, &modules, graph.as_ref(), &config)?;
+    } else if cache.exists() {
+        // CMakeLists.txt exists and we have cached metadata — run an
+        // incremental sync so that any source-file changes since the last
+        // init/sync are reflected before configure + build.
+        reporter.report_info("Checking for source changes ...");
+        match cache.load() {
+            Some(mut prev_meta) => {
+                match do_incremental_sync(&root, &mut config, &mut prev_meta, &reporter) {
+                    Ok(n) if n > 0 => {
+                        // Persist updated metadata.
+                        let meta = ProjectMeta {
+                            config: config.clone(),
+                            modules: prev_meta.modules,
+                            dependency_graph: prev_meta.dependency_graph,
+                            file_checksums: prev_meta.file_checksums,
+                            last_sync: chrono::Utc::now().to_rfc3339(),
+                        };
+                        if let Err(e) = cache.save(&meta) {
+                            reporter.report_warning(&format!(
+                                "Failed to save synced metadata: {}. Build will proceed.",
+                                e
+                            ));
+                        } else {
+                            reporter.report_success("CMakeLists.txt synced before build");
+                        }
+                    }
+                    Ok(_) => {
+                        reporter.report_info("No source changes — skipping sync");
+                    }
+                    Err(e) => {
+                        // Sync failure shouldn't block the build — the
+                        // existing CMakeLists.txt may still be valid.
+                        reporter.report_warning(&format!(
+                            "Incremental sync failed: {}. Proceeding with existing CMakeLists.txt.",
+                            e
+                        ));
+                    }
+                }
+            }
+            None => {
+                reporter.report_warning(
+                    "Cache exists but failed to load — skipping sync, proceeding with build.",
+                );
+            }
+        }
     }
 
     // Configure.
     let build_dir = root.join(&cli.output);
     std::fs::create_dir_all(&build_dir).map_err(FbGenError::Io)?;
+
+    let toolchain_args = cmake_toolchain_args(&config);
+
+    // If cross-compiling with a toolchain file, remove stale cache leftover
+    // from a previous configure that ran without one.  Otherwise cmake
+    // ignores the new -DCMAKE_TOOLCHAIN_FILE= and keeps the host compiler.
+    if !toolchain_args.is_empty() {
+        let cache_file = build_dir.join("CMakeCache.txt");
+        if cache_file.exists() {
+            let cache_stale = std::fs::read_to_string(&cache_file)
+                .map(|contents| {
+                    !toolchain_args.iter().any(|a| {
+                        if let Some(path) = a.strip_prefix("-DCMAKE_TOOLCHAIN_FILE=") {
+                            contents.contains(path)
+                        } else {
+                            contents.contains(a.as_str())
+                        }
+                    })
+                })
+                .unwrap_or(true);
+            if cache_stale {
+                reporter.report_info(
+                    "Stale CMake cache detected — removing for clean toolchain configure.",
+                );
+                let _ = std::fs::remove_file(&cache_file);
+            }
+        }
+    }
 
     let gen_str = if gen_flags.is_empty() {
         String::new()
@@ -797,7 +1241,6 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
     for f in &gen_flags {
         cmd.arg(f);
     }
-    let toolchain_args = cmake_toolchain_args(&config);
     for f in &toolchain_args {
         cmd.arg(f);
     }
@@ -833,6 +1276,72 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
     }
 
     Ok(())
+}
+
+/// Filter out user CMake modules whose source files overlap with fb-gen's
+/// own modules.  Prevents duplicate compilation when a user-provided cmake
+/// file (e.g. CubeMX) references the same `.c` / `.cpp` / `.s` files that
+/// fb-gen already discovered.
+fn filter_overlapping_user_modules(
+    user_modules: Vec<PathBuf>,
+    modules: &[CMakeModule],
+    root: &Path,
+    reporter: &Reporter,
+) -> Vec<PathBuf> {
+    // Build a set of all file paths covered by fb-gen modules.
+    // Canonicalise both sides so symlinks don't break the comparison.
+    let canonicalize = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+
+    let fb_files: std::collections::HashSet<PathBuf> = modules
+        .iter()
+        .flat_map(|m| {
+            m.sources
+                .iter()
+                .map(|s| canonicalize(&s.path))
+                .chain(m.asm_sources.iter().map(|s| canonicalize(&s.path)))
+        })
+        .collect();
+
+    if fb_files.is_empty() {
+        return user_modules;
+    }
+
+    user_modules
+        .into_iter()
+        .filter(|um| {
+            let cmake_path = root.join(um).join("CMakeLists.txt");
+            let content = match std::fs::read_to_string(&cmake_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    reporter.report_warning(&format!(
+                        "Cannot read user CMakeLists.txt '{}': {}. Keeping module.",
+                        cmake_path.display(),
+                        e
+                    ));
+                    return true; // can't read → keep it (preserve existing behaviour)
+                }
+            };
+
+            // Collect source paths referenced in this cmake file.
+            for cap in CMAKE_SOURCE_PATH_RE.captures_iter(&content) {
+                if let Some(m) = cap.get(1) {
+                    let rel_path = m.as_str();
+                    // Resolve relative to the cmake file's directory.
+                    let resolved = canonicalize(&root.join(um).join(rel_path));
+
+                    if fb_files.contains(&resolved) {
+                        reporter.report_info(&format!(
+                            "Skipping user CMake module '{}' — sources overlap with fb-gen modules",
+                            um.display()
+                        ));
+                        return false; // overlap → exclude this user module
+                    }
+                }
+            }
+
+            true
+        })
+        .collect()
 }
 
 // ── internal helpers ───────────────────────────────────────────────────────
