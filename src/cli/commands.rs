@@ -417,9 +417,9 @@ fn generate_compile_commands(
     }
     cmd.arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
 
-    reporter.report_info(&format!(
+    reporter.report_info(
         "Running cmake configure for compile_commands.json (--lsp) ..."
-    ));
+    );
 
     match cmd.output() {
         Ok(output) if output.status.success() => {
