@@ -310,6 +310,128 @@ pub const STM32F1_HAL: Package = Package {
     }),
 };
 
+// ── Middleware ─────────────────────────────────────────────────
+
+/// FreeRTOS kernel — real-time operating system for microcontrollers.
+pub const FREERTOS_KERNEL: Package = Package {
+    id: "freertos-kernel",
+    name: "FreeRTOS Kernel",
+    kind: PackageKind::Middleware,
+    version: "11.1.0",
+    arch: None,  // Cross-architecture
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/FreeRTOS/FreeRTOS-Kernel/archive/refs/tags/V11.1.0.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],  // No hard dependency; works standalone
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &["include"],
+        source_globs: &[
+            "*.c",
+            "portable/GCC/ARM_CM3/*.c",
+        ],
+        compile_defines: &[],
+        link_libraries: &[],
+    }),
+};
+
+/// lwIP — lightweight TCP/IP stack.
+pub const LWIP: Package = Package {
+    id: "lwip",
+    name: "lwIP (Lightweight TCP/IP Stack)",
+    kind: PackageKind::Middleware,
+    version: "2.2.0",
+    arch: None,
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/lwip-tcpip/lwip/archive/refs/tags/STABLE-2_2_0_RELEASE.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &["src/include"],
+        source_globs: &[
+            "src/core/*.c",
+            "src/core/ipv4/*.c",
+            "src/api/*.c",
+            "src/netif/*.c",
+        ],
+        compile_defines: &[],
+        link_libraries: &[],
+    }),
+};
+
+/// FatFS — generic FAT/exFAT filesystem.
+pub const FATFS: Package = Package {
+    id: "fatfs",
+    name: "FatFS (FAT/exFAT Filesystem)",
+    kind: PackageKind::Middleware,
+    version: "0.15",
+    arch: None,
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/abbrev/fatfs/archive/refs/tags/v0.15.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &["source"],
+        source_globs: &["source/*.c"],
+        compile_defines: &[],
+        link_libraries: &[],
+    }),
+};
+
+/// mbed TLS — cryptographic and TLS library.
+pub const MBEDTLS: Package = Package {
+    id: "mbedtls",
+    name: "mbed TLS (Cryptographic & TLS Library)",
+    kind: PackageKind::Middleware,
+    version: "3.6.0",
+    arch: None,
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/Mbed-TLS/mbedtls/archive/refs/tags/v3.6.0.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &["include"],
+        source_globs: &["library/*.c"],
+        compile_defines: &[],
+        link_libraries: &[],
+    }),
+};
+
 /// Full catalogue — all available toolchain packages.
 pub static CATALOGUE: &[&Package] = &[
     &ARM_NONE_EABI,
@@ -319,6 +441,10 @@ pub static CATALOGUE: &[&Package] = &[
     &ARM_LINUX_GNUEABIHF,
     &AARCH64_LINUX_GNU,
     &STM32F1_HAL,
+    &FREERTOS_KERNEL,
+    &LWIP,
+    &FATFS,
+    &MBEDTLS,
 ];
 
 
@@ -457,5 +583,29 @@ mod tests {
         assert!(!meta.include_dirs.is_empty());
         assert!(!meta.source_globs.is_empty());
         assert!(meta.compile_defines.contains(&"USE_HAL_DRIVER"));
+    }
+
+    #[test]
+    fn test_freertos_is_middleware() {
+        assert_eq!(FREERTOS_KERNEL.kind, PackageKind::Middleware);
+        assert!(FREERTOS_KERNEL.cmake_metadata.is_some());
+        assert!(FREERTOS_KERNEL.dependencies.is_empty());
+        // FreeRTOS has include dirs and source files.
+        let meta = FREERTOS_KERNEL.cmake_metadata.as_ref().unwrap();
+        assert!(!meta.include_dirs.is_empty());
+        assert!(!meta.source_globs.is_empty());
+    }
+
+    #[test]
+    fn test_middleware_packages_are_in_catalogue() {
+        let middleware_ids: Vec<&str> = CATALOGUE.iter()
+            .filter(|p| p.kind == PackageKind::Middleware)
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(middleware_ids.len(), 4);
+        assert!(middleware_ids.contains(&"freertos-kernel"));
+        assert!(middleware_ids.contains(&"lwip"));
+        assert!(middleware_ids.contains(&"fatfs"));
+        assert!(middleware_ids.contains(&"mbedtls"));
     }
 }

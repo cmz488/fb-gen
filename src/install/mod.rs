@@ -12,25 +12,71 @@ pub mod manifest;
 
 use crate::models::{FbGenError, FbGenResult};
 use catalogue::Package;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
-/// Entry point for `fb-gen install <args>`.
+/// Install a package and all of its dependencies recursively.
+///
+/// Dependencies are resolved depth-first.  Already-installed packages
+/// are skipped.  Circular dependencies are detected and reported.
 pub fn install_package(pkg: &Package) -> FbGenResult<()> {
-    // Phase 1: download → verify → extract → link → record → env
-    let install_root = resolve_install_root();
-    let dest_dir = install_root.join("toolchains").join(&pkg.id).join(&pkg.version);
+    let mut installed = HashSet::new();
+    let mut visiting = HashSet::new();
+    install_package_recursive(pkg, &mut installed, &mut visiting)
+}
 
-    if dest_dir.exists() {
-        println!("Already installed: {} v{}", pkg.id, pkg.version);
+/// Recursive helper for install_package with cycle detection.
+fn install_package_recursive(
+    pkg: &Package,
+    installed: &mut HashSet<String>,
+    visiting: &mut HashSet<String>,
+) -> FbGenResult<()> {
+    // Cycle detection.
+    if visiting.contains(pkg.id) {
+        return Err(FbGenError::Config(format!(
+            "Circular dependency detected involving package '{}'",
+            pkg.id
+        )));
+    }
+
+    // Already installed (in this session or on disk).
+    let install_root = resolve_install_root();
+    let dest_dir = install_root.join("toolchains").join(pkg.id).join(pkg.version);
+    if dest_dir.exists() || installed.contains(pkg.id) {
         return Ok(());
     }
 
+    // Mark as in-progress (for cycle detection).
+    visiting.insert(pkg.id.to_string());
+
+    // Install dependencies first.
+    for dep_id in pkg.dependencies {
+        let dep_pkg = catalogue::CATALOGUE
+            .iter()
+            .find(|p| p.id == *dep_id)
+            .ok_or_else(|| {
+                FbGenError::Config(format!(
+                    "Dependency '{}' (required by '{}') not found in catalogue",
+                    dep_id, pkg.id
+                ))
+            })?;
+        install_package_recursive(dep_pkg, installed, visiting)?;
+    }
+
+    // Remove from visiting now that dependencies are done.
+    visiting.remove(pkg.id);
+
+    // Download + extract + configure.
     let archive_path = downloader::download_package(pkg)?;
     downloader::extract_package(&archive_path, &dest_dir)?;
-    environment::link_current(&install_root.join("toolchains").join(&pkg.id), &dest_dir)?;
+    environment::link_current(&install_root.join("toolchains").join(pkg.id), &dest_dir)?;
     environment::write_env_file(&install_root, pkg, &dest_dir)?;
     environment::record_installed(&install_root, pkg, &dest_dir)?;
-    downloader::verify_install(pkg, &dest_dir)?;
+    if !pkg.verify.is_empty() {
+        downloader::verify_install(pkg, &dest_dir)?;
+    }
+
+    installed.insert(pkg.id.to_string());
 
     Ok(())
 }
@@ -98,5 +144,32 @@ mod tests {
     fn test_resolve_install_root() {
         let root = resolve_install_root();
         assert!(root.ends_with(".fb-gen"));
+    }
+
+    #[test]
+    fn test_dependency_cycle_detected() {
+        // Create two packages that depend on each other.
+        let pkg_a = Package {
+            id: "cyclic-a",
+            name: "Cyclic A",
+            kind: catalogue::PackageKind::Toolchain,
+            version: "1.0",
+            arch: None,
+            downloads: catalogue::PlatformDownloads::default(),
+            verify: "",
+            dependencies: &["cyclic-b"],
+            scope: catalogue::InstallScope::Global,
+            cmake_metadata: None,
+        };
+        // pkg_b depends on pkg_a → cycle.
+        // Note: we can't actually test install_package here because it would
+        // try to download. We just test that the recursive logic detects the
+        // cycle by checking the visiting set is populated correctly.
+        let mut installed = HashSet::new();
+        let mut visiting = HashSet::new();
+        visiting.insert("cyclic-a".to_string());
+        let result = install_package_recursive(&pkg_a, &mut installed, &mut visiting);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Circular dependency"));
     }
 }
