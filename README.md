@@ -2,14 +2,12 @@
   
 
 <div align="center">
-<pre style="display:inline-block;text-align:left;line-height:1.2;font-weight:bold;">
-<span style="color:#00d4ff;"> ████   █    █   ██████</span>
-<span style="color:#00bcd4;">█    █  ██  ██      █</span>
-<span style="color:#5c9ce6;">█       █ ██ █     █</span>
-<span style="color:#4a7fd4;">█       █    █    █</span>
-<span style="color:#5cdb5c;">█    █  █    █   █</span>
-<span style="color:#00a651;"> ████   █    █   ██████</span>
-</pre>
+<code style="color:#00d4ff;font-weight:bold;"> ████   █    █   ██████</code><br>
+<code style="color:#00bcd4;font-weight:bold;">█    █  ██  ██      █</code><br>
+<code style="color:#5c9ce6;font-weight:bold;">█       █ ██ █     █</code><br>
+<code style="color:#4a7fd4;font-weight:bold;">█       █    █    █</code><br>
+<code style="color:#5cdb5c;font-weight:bold;">█    █  █    █   █</code><br>
+<code style="color:#00a651;font-weight:bold;"> ████   █    █   ██████</code>
 </div>
 <p align="center" style="color:gray;">
   <b>CMakeLists.txt自动生成工具</b>
