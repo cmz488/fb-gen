@@ -249,6 +249,11 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>) -> FbGenResult<()> {
             .sum::<usize>()
     ));
 
+    // ── LSP ──────────────────────────────────────────────────────────
+    if cli.lsp {
+        generate_compile_commands(&root, &config.output_dir, &config, &reporter);
+    }
+
     Ok(())
 }
 
@@ -289,6 +294,11 @@ pub fn cmd_sync(cli: &Cli) -> FbGenResult<()> {
         ));
     } else {
         reporter.report_success("No changes detected — everything up to date.");
+    }
+
+    // ── LSP ──────────────────────────────────────────────────────────
+    if cli.lsp {
+        generate_compile_commands(&root, &config.output_dir, &config, &reporter);
     }
 
     // ── Watch loop ──────────────────────────────────────────────────────
