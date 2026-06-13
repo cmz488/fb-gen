@@ -151,6 +151,144 @@ impl UserQuery {
                 }
             };
 
+            let ask_device_defines = || -> FbGenResult<Vec<String>> {
+                /// Menu items: (display label, define value).
+                fn menu() -> &'static [(&'static str, &'static str)] {
+                    &[
+                        // ── STM32 ─────────────────────────────────────
+                        ("STM32F103xB", "STM32F103xB"),
+                        ("STM32F103xE", "STM32F103xE"),
+                        ("STM32F405xx", "STM32F405xx"),
+                        ("STM32F407xx", "STM32F407xx"),
+                        ("STM32F429xx", "STM32F429xx"),
+                        ("STM32F446xx", "STM32F446xx"),
+                        ("STM32F303xx", "STM32F303xx"),
+                        ("STM32F767xx", "STM32F767xx"),
+                        ("STM32G474xx", "STM32G474xx"),
+                        ("STM32F030x6", "STM32F030x6"),
+                        ("STM32F746xx", "STM32F746xx"),
+                        ("STM32H743xx", "STM32H743xx"),
+                        ("STM32H503xx", "STM32H503xx"),
+                        ("STM32G031xx", "STM32G031xx"),
+                        ("STM32L476xx", "STM32L476xx"),
+                        ("STM32L031xx", "STM32L031xx"),
+                        ("STM32L552xx", "STM32L552xx"),
+                        ("STM32U575xx", "STM32U575xx"),
+                        ("STM32WB55xx", "STM32WB55xx"),
+                        ("STM32WL5xxx", "STM32WL5xxx"),
+                        // ── Nordic nRF ────────────────────────────────
+                        ("NRF52832", "NRF52832"),
+                        ("NRF52840", "NRF52840"),
+                        ("NRF5340", "NRF5340"),
+                        ("NRF9160", "NRF9160"),
+                        // ── Microchip/Atmel SAM ───────────────────────
+                        ("SAMD21", "SAMD21"),
+                        ("SAMD51", "SAMD51"),
+                        ("SAME51", "SAME51"),
+                        // ── NXP ───────────────────────────────────────
+                        ("MK64F12", "MK64F12"),
+                        ("LPC1768", "LPC1768"),
+                        ("IMXRT1062", "IMXRT1062"),
+                        // ── Espressif ─────────────────────────────────
+                        ("ESP32", "ESP32"),
+                        ("ESP32S3", "ESP32S3"),
+                        // ── Raspberry Pi ──────────────────────────────
+                        ("RP2040", "RP2040"),
+                        // ── Other ─────────────────────────────────────
+                        ("GD32F303", "GD32F303"),
+                        ("AT32F407", "AT32F407"),
+                        // ── Library config ────────────────────────────
+                        ("USE_HAL_DRIVER", "USE_HAL_DRIVER"),
+                        ("USE_FULL_LL_DRIVER", "USE_FULL_LL_DRIVER"),
+                    ]
+                }
+
+                let menu = menu();
+                println!();
+                println!("  ── Device Define Selection ────────────────────────");
+                println!("  Select space-separated numbers, or type C for custom, Enter to skip.");
+                println!();
+
+                // Print in three columns.
+                for (i, (label, _define)) in menu.iter().enumerate() {
+                    let num = i + 1;
+                    if i == 20 {
+                        println!(); // separator after STM32 group
+                    } else if i == 24 {
+                        println!(); // after nRF
+                    } else if i == 27 {
+                        println!(); // after SAM
+                    } else if i == 30 {
+                        println!(); // after NXP
+                    } else if i == 32 {
+                        println!(); // after Espressif
+                    } else if i == 33 {
+                        println!(); // after RP2040
+                    } else if i == 35 {
+                        println!(); // after Other
+                    }
+                    if (i % 4) == 3 {
+                        println!("    {:>2}) {:<20}", num, label);
+                    } else {
+                        print!("    {:>2}) {:<20}", num, label);
+                    }
+                }
+                // Flush last line if it didn't end with newline.
+                if menu.len() % 4 != 0 {
+                    println!();
+                }
+
+                let answer = prompt_with_default(
+                    "  Selection (numbers, C=custom, Enter=skip) []", ""
+                ).map_err(|e| {
+                    crate::models::FbGenError::Config(format!(
+                        "failed to read device defines: {e}"
+                    ))
+                })?;
+
+                let trimmed = answer.trim();
+                if trimmed.is_empty() {
+                    return Ok(Vec::new());
+                }
+
+                // Custom: prompt for raw defines.
+                if trimmed.eq_ignore_ascii_case("c") {
+                    println!("  Examples: STM32F103xB USE_HAL_DRIVER");
+                    let custom = prompt_with_default(
+                        "  Enter device defines (space-separated) []", ""
+                    ).map_err(|e| {
+                        crate::models::FbGenError::Config(format!(
+                            "failed to read device defines: {e}"
+                        ))
+                    })?;
+                    if custom.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    return Ok(custom.split_whitespace().map(String::from).collect());
+                }
+
+                // Parse numbers.
+                let mut result: Vec<String> = Vec::new();
+                for part in trimmed.split_whitespace() {
+                    match part.parse::<usize>() {
+                        Ok(n) if n >= 1 && n <= menu.len() => {
+                            let define = menu[n - 1].1.to_string();
+                            if !result.contains(&define) {
+                                result.push(define);
+                            }
+                        }
+                        _ => {
+                            // Treat unrecognised input as a raw define.
+                            let define = part.to_string();
+                            if !result.contains(&define) {
+                                result.push(define);
+                            }
+                        }
+                    }
+                }
+                Ok(result)
+            };
+
             if compatible.is_empty() {
                 println!();
                 println!("  No compatible toolchain auto-detected for {:?}.", target_arch);
@@ -189,6 +327,9 @@ impl UserQuery {
 
                 let (cpu, float_abi, fpu, extra_flags) = ask_mcu_cpu()?;
 
+                // ── Device defines ──
+                let device_defines = ask_device_defines()?;
+
                 toolchain = Some(crate::models::project::ToolchainConfig {
                     cpu,
                     float_abi,
@@ -197,6 +338,7 @@ impl UserQuery {
                     prefix,
                     sysroot,
                     find_root_path,
+                    device_defines,
                 });
             } else {
                 // Show detected toolchains for the user to pick from.
@@ -268,6 +410,9 @@ impl UserQuery {
 
                 let (cpu, float_abi, fpu, extra_flags) = ask_mcu_cpu()?;
 
+                // ── Device defines ──
+                let device_defines = ask_device_defines()?;
+
                 toolchain = Some(crate::models::project::ToolchainConfig {
                     cpu,
                     float_abi,
@@ -276,6 +421,7 @@ impl UserQuery {
                     prefix,
                     sysroot,
                     find_root_path,
+                    device_defines,
                 });
             }
         }
@@ -400,6 +546,9 @@ impl UserQuery {
             }
             if !tc.find_root_path.is_empty() {
                 println!("    Find root paths:  {}", tc.find_root_path.join(" "));
+            }
+            if !tc.device_defines.is_empty() {
+                println!("    Device defines:   {}", tc.device_defines.join(" "));
             }
         }
         println!("  ────────────────────────────────────────────────────");

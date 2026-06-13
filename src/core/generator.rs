@@ -14,7 +14,7 @@
 
 use crate::models::dependency::{DependencyGraph, DependencyType};
 use crate::models::error::{FbGenError, FbGenResult};
-use crate::models::module::CMakeModule;
+use crate::models::module::{CMakeModule, TargetType};
 use crate::models::project::{ProjectConfig, TargetArch, ToolchainConfig};
 use std::collections::HashSet;
 use std::fs;
@@ -117,7 +117,7 @@ target_include_directories({{ target_name }} PUBLIC
 {% if dependencies -%}
 # ── Dependencies ────────────────────────────────────────────────────────────
 {% for dep in dependencies -%}
-target_link_libraries({{ target_name }} {% if is_header_only %}INTERFACE{% else %}{{ dep.type }}{% endif %} {{ dep.name }})
+target_link_libraries({{ target_name }}{% if is_header_only %} INTERFACE{% endif %} {{ dep.name }})
 {% endfor %}
 {% endif %}
 
@@ -293,12 +293,35 @@ impl CMakeGenerator {
                 continue;
             }
 
-            let deps: Vec<(String, DependencyType)> = graph.get_dependencies(&module.name);
+            let mut deps: Vec<(String, DependencyType)> = graph.get_dependencies(&module.name);
+
+            // Augment with companion source modules for header-only
+            // dependencies.  When A depends on a header-only B, it also
+            // needs to link against B's sibling source module (e.g.
+            // Drivers_..._Inc → Drivers_..._Src) so that the function
+            // implementations are available at link time.
+            Self::augment_companion_sources(&mut deps, &module.name, modules, graph);
+
             let content = self.render_module(module, &deps, graph)?;
             let module_cmake_path = module.path.join("CMakeLists.txt");
             self.write_if_changed(&module_cmake_path, &content, &module.name, force)?;
         }
 
+        Ok(())
+    }
+
+    /// Force-generate `cmake/toolchain.cmake` even when a user-owned toolchain
+    /// file is detected.  Used when `device_defines` have been configured and
+    /// the preset must be switched to fb-gen's own toolchain file.
+    pub fn force_generate_toolchain(&self) -> FbGenResult<()> {
+        let root_ld_scripts = detect_linker_scripts(&self.config.root);
+        if let Some(content) = self.render_toolchain(&root_ld_scripts)? {
+            let path = self.config.root.join("cmake").join("toolchain.cmake");
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(FbGenError::Io)?;
+            }
+            fs::write(&path, &content).map_err(FbGenError::Io)?;
+        }
         Ok(())
     }
 
@@ -534,6 +557,81 @@ impl CMakeGenerator {
             .map_err(FbGenError::Template)
     }
 
+    /// Augment `deps` with companion source modules for transitive header-only
+    /// dependencies.  Walks the dependency tree: whenever a header-only module
+    /// has a sibling source module (e.g. `Drivers_..._Inc` ↔ `Drivers_..._Src`),
+    /// consumers that transitively depend on the header-only module must also
+    /// link the source module so that function implementations are available.
+    fn augment_companion_sources(
+        deps: &mut Vec<(String, DependencyType)>,
+        self_name: &str,
+        all_modules: &[CMakeModule],
+        graph: &DependencyGraph,
+    ) {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        // Collect companion source modules by first finding header-only
+        // modules with sibling source modules.
+        let companion_of: HashMap<&str, Vec<String>> = {
+            let mut map: HashMap<&str, Vec<String>> = HashMap::new();
+            for m in all_modules {
+                if m.target_type != TargetType::HeaderOnly {
+                    continue;
+                }
+                let parent = match m.relative_path.parent() {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let sources: Vec<String> = all_modules
+                    .iter()
+                    .filter(|s| {
+                        s.target_type == TargetType::StaticLibrary
+                            && s.name != m.name
+                            && s.relative_path.parent() == Some(parent)
+                    })
+                    .map(|s| s.name.clone())
+                    .collect();
+                if !sources.is_empty() {
+                    map.insert(m.name.as_str(), sources);
+                }
+            }
+            map
+        };
+
+        if companion_of.is_empty() {
+            return;
+        }
+
+        // BFS over the transitive dependency tree from the module's direct
+        // deps, collecting companion source modules along the way.
+        let mut seen: HashSet<String> = deps.iter().map(|(n, _)| n.clone()).collect();
+        let mut queue: VecDeque<String> = deps.iter().map(|(n, _)| n.clone()).collect();
+        let mut extra: Vec<(String, DependencyType)> = Vec::new();
+
+        while let Some(dep_name) = queue.pop_front() {
+            // If this dep has companion source modules, add them.
+            if let Some(companions) = companion_of.get(dep_name.as_str()) {
+                for comp in companions {
+                    if comp == self_name {
+                        continue;
+                    }
+                    if seen.insert(comp.clone()) {
+                        extra.push((comp.clone(), DependencyType::Public));
+                    }
+                }
+            }
+
+            // Walk the dep's own dependencies transitively.
+            for (sub_name, _) in graph.get_dependencies(&dep_name) {
+                if seen.insert(sub_name.clone()) {
+                    queue.push_back(sub_name);
+                }
+            }
+        }
+
+        deps.extend(extra);
+    }
+
     /// Render the toolchain.cmake content for cross-compilation targets.
     ///
     /// Returns `Ok(None)` if the target architecture does not require a toolchain
@@ -696,6 +794,11 @@ impl CMakeGenerator {
         }
         if !tc.extra_flags.is_empty() {
             flags.push(tc.extra_flags.clone());
+        }
+        for define in &tc.device_defines {
+            if !define.is_empty() {
+                flags.push(format!("-D{}", define));
+            }
         }
         let target_flags = flags.join(" ");
 

@@ -5,6 +5,8 @@
 ## 简介
 
 `fb-gen` (Fast Build Generate) 是一个命令行工具，用于将 C/C++ 项目自动转化为结构清晰的 CMake 构建系统。
+你是否厌烦了`CMake`琐碎的脚本语言(他居然是图灵完备的),想拥有cargo和rust的优雅体验，本工具模仿mod.rs的构建方法，把每一个含有*.c/*.h/*.cpp/*.hpp的独立文件夹视为一个项目模块，根据模块间依赖图，生成CMakeLists.txt配置文件。
+给你丝滑的cpp/c项目构建体验。
 
 **核心理念：**
 
@@ -84,6 +86,7 @@ fb-gen run --watch            # 启用文件监控，自动增量更新
 | `-w, --watch` | 启用文件监控，自动增量更新 | — |
 | `-v, --verbose` | 详细输出（`-vv` / `-vvv` 更详细） | — |
 | `-q, --quiet` | 静默模式，仅输出错误 | — |
+| `-lsp` |生成complie_command.json文件共lsp分析| - |
 
 ## 架构
 

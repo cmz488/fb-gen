@@ -71,6 +71,11 @@ pub struct ToolchainConfig {
     /// Appended after `${CMAKE_SYSROOT}` in the generated toolchain file.
     #[serde(default)]
     pub find_root_path: Vec<String>,
+
+    /// Device-specific compile definitions (e.g. `"STM32F103xB"`, `"USE_HAL_DRIVER"`).
+    /// Each entry is emitted as `-D<define>` in `TARGET_FLAGS`.
+    #[serde(default)]
+    pub device_defines: Vec<String>,
 }
 
 impl Default for ToolchainConfig {
@@ -83,6 +88,7 @@ impl Default for ToolchainConfig {
             prefix: String::new(),
             sysroot: None,
             find_root_path: Vec::new(),
+            device_defines: Vec::new(),
         }
     }
 }
@@ -171,6 +177,15 @@ pub struct ConfigurePreset {
     pub generator: Option<String>,
     pub toolchain_file: Option<String>,
     pub binary_dir: Option<String>,
+    /// Name of another configure preset to inherit from.
+    #[serde(default)]
+    pub inherits: Option<String>,
+    /// Whether this preset should be hidden in GUI tools.
+    #[serde(default)]
+    pub hidden: Option<bool>,
+    /// Cache variable overrides applied when this preset is selected.
+    #[serde(default)]
+    pub cache_variables: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// A build preset from CMakePresets.json.
