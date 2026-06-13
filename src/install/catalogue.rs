@@ -273,6 +273,43 @@ pub const AARCH64_LINUX_GNU: Package = Package {
     cmake_metadata: None,
 };
 
+// ── MCU SDKs ─────────────────────────────────────────────────
+
+/// STM32CubeF1 HAL — STM32F1xx Hardware Abstraction Layer.
+pub const STM32F1_HAL: Package = Package {
+    id: "stm32f1-hal",
+    name: "STM32CubeF1 HAL",
+    kind: PackageKind::McuSdk,
+    version: "1.8.5",
+    arch: Some(TargetArch::NoneEabi),
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/STMicroelectronics/STM32CubeF1/archive/refs/tags/v1.8.5.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",  // SDKs don't have a binary to verify
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &[
+            "Drivers/STM32F1xx_HAL_Driver/Inc",
+            "Drivers/STM32F1xx_HAL_Driver/Inc/Legacy",
+            "Drivers/CMSIS/Device/ST/STM32F1xx/Include",
+            "Drivers/CMSIS/Include",
+        ],
+        source_globs: &[
+            "Drivers/STM32F1xx_HAL_Driver/Src/*.c",
+        ],
+        compile_defines: &["USE_HAL_DRIVER", "STM32F103xB"],
+        link_libraries: &[],
+    }),
+};
+
 /// Full catalogue — all available toolchain packages.
 pub static CATALOGUE: &[&Package] = &[
     &ARM_NONE_EABI,
@@ -281,6 +318,7 @@ pub static CATALOGUE: &[&Package] = &[
     &RISCV64_UNKNOWN_ELF,
     &ARM_LINUX_GNUEABIHF,
     &AARCH64_LINUX_GNU,
+    &STM32F1_HAL,
 ];
 
 
@@ -392,16 +430,32 @@ mod tests {
             assert!(!pkg.id.is_empty(), "id must not be empty");
             assert!(!pkg.name.is_empty(), "name must not be empty");
             assert!(!pkg.version.is_empty(), "version must not be empty");
-            assert!(!pkg.verify.is_empty(), "verify must not be empty");
-            assert_eq!(pkg.kind, PackageKind::Toolchain);
-            assert!(pkg.arch.is_some(), "arch must be set for toolchains");
             assert!(pkg.dependencies.is_empty());
-            assert!(pkg.cmake_metadata.is_none());
+            match pkg.kind {
+                PackageKind::Toolchain => {
+                    assert!(!pkg.verify.is_empty(), "toolchain verify must not be empty");
+                    assert!(pkg.arch.is_some(), "arch must be set for toolchains");
+                    assert!(pkg.cmake_metadata.is_none());
+                }
+                PackageKind::McuSdk | PackageKind::Middleware => {
+                    assert!(pkg.verify.is_empty(), "SDK/middleware verify should be empty");
+                    assert!(pkg.cmake_metadata.is_some(), "SDK/middleware must have cmake_metadata");
+                }
+            }
         }
     }
 
     #[test]
     fn test_package_verify_field() {
         assert!(ARM_NONE_EABI.verify.contains("arm-none-eabi"));
+    }
+
+    #[test]
+    fn test_stm32f1_hal_has_cmake_metadata() {
+        assert_eq!(STM32F1_HAL.kind, PackageKind::McuSdk);
+        let meta = STM32F1_HAL.cmake_metadata.as_ref().unwrap();
+        assert!(!meta.include_dirs.is_empty());
+        assert!(!meta.source_globs.is_empty());
+        assert!(meta.compile_defines.contains(&"USE_HAL_DRIVER"));
     }
 }

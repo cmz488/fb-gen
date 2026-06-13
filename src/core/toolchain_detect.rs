@@ -38,6 +38,13 @@ const KNOWN_TOOLCHAINS: &[(&str, TargetArch)] = &[
     // riscv64 group
     ("riscv64-unknown-elf", TargetArch::RISCV64),
     ("riscv64-linux-gnu", TargetArch::RISCV64),
+    // riscv32 group (e.g. ESP32-C3/C6/H2/P4, GD32VF103)
+    ("riscv32-esp-elf", TargetArch::RISCV32),
+    ("riscv32-unknown-elf", TargetArch::RISCV32),
+    // xtensa group (ESP32 / ESP32-S2 / ESP32-S3)
+    ("xtensa-esp32-elf", TargetArch::Xtensa),
+    ("xtensa-esp32s2-elf", TargetArch::Xtensa),
+    ("xtensa-esp32s3-elf", TargetArch::Xtensa),
 ];
 
 /// Scan `$PATH` for cross-compilation toolchains.

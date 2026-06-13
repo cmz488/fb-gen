@@ -1,10 +1,7 @@
 //! CMake bridge — collects source-file metadata from installed SDK packages
 //! and feeds it into the CMakeLists.txt generation pipeline.
-//!
-//! Phase 1: toolchains carry no `CmakePackageMeta`, so this always returns
-//! an empty `Vec`.  SDK support (Phase 3) will read `~/.fb-gen/installed/*.json`,
-//! expand source globs, and return injectable `PackageSources`.
 
+use crate::install::environment::InstalledRecord;
 use std::path::PathBuf;
 
 /// Sources collected from an installed SDK/middleware package,
@@ -20,24 +17,127 @@ pub struct PackageSources {
 
 /// Scan `~/.fb-gen/installed/` for packages with `CmakePackageMeta`,
 /// expand source globs, and return injectable `PackageSources`.
-///
-/// Phase 1 stub — always returns an empty `Vec`.
 pub fn scan_installed_packages() -> Vec<PackageSources> {
-    // Phase 3+ will:
-    //   1. Read ~/.fb-gen/installed/*.json
-    //   2. Filter packages with cmake_metadata
-    //   3. Expand source_globs → absolute PathBufs
-    //   4. Return Vec<PackageSources>
-    Vec::new()
+    use crate::install::catalogue::CATALOGUE;
+
+    let install_root = crate::install::resolve_install_root();
+    let installed_dir = install_root.join("installed");
+
+    if !installed_dir.exists() {
+        return Vec::new();
+    }
+
+    let mut results: Vec<PackageSources> = Vec::new();
+
+    // Read all installed record JSON files.
+    let entries = match std::fs::read_dir(&installed_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map_or(false, |e| e == "json") {
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let record: InstalledRecord = match serde_json::from_str(&content) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            // Find matching catalogue entry to get cmake_metadata.
+            let catalogue_pkg = match CATALOGUE.iter().find(|p| p.id == record.id) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Only SDKs and middleware have cmake_metadata.
+            let meta = match &catalogue_pkg.cmake_metadata {
+                Some(m) => m,
+                None => continue,
+            };
+
+            let prefix = PathBuf::from(&record.prefix_path);
+
+            // Expand source globs.
+            let mut source_files: Vec<PathBuf> = Vec::new();
+            for glob_pattern in meta.source_globs {
+                let expanded = expand_simple_glob(&prefix, glob_pattern);
+                source_files.extend(expanded);
+            }
+
+            // Resolve include dirs to absolute paths.
+            let include_dirs: Vec<PathBuf> = meta
+                .include_dirs
+                .iter()
+                .map(|d| prefix.join(d))
+                .filter(|d| d.exists())
+                .collect();
+
+            results.push(PackageSources {
+                package_name: catalogue_pkg.name.to_string(),
+                include_dirs,
+                source_files,
+                compile_defines: meta.compile_defines.iter().map(|s| s.to_string()).collect(),
+                link_libraries: meta.link_libraries.iter().map(|s| s.to_string()).collect(),
+            });
+        }
+    }
+
+    results
+}
+
+/// Simple glob expansion: given a base directory and a pattern like
+/// `"Drivers/STM32F1xx_HAL_Driver/Src/*.c"`, return all matching files.
+fn expand_simple_glob(base_dir: &PathBuf, pattern: &str) -> Vec<PathBuf> {
+    let mut results: Vec<PathBuf> = Vec::new();
+
+    // Split pattern into directory part and file-suffix part.
+    // Pattern: "Drivers/STM32F1xx_HAL_Driver/Src/*.c"
+    //   -> dir: "Drivers/STM32F1xx_HAL_Driver/Src"
+    //   -> suffix: ".c"
+    let (dir_part, suffix) = match pattern.rsplit_once('/') {
+        Some((d, "*")) => (d, ""),  // pattern ends with "/*" -> match all files
+        Some((d, f)) if f.starts_with('*') => (d, &f[1..]),  // "*.c" -> suffix ".c"
+        _ => return results,
+    };
+
+    let search_dir = base_dir.join(dir_part);
+    if !search_dir.exists() {
+        return results;
+    }
+
+    let entries = match std::fs::read_dir(&search_dir) {
+        Ok(e) => e,
+        Err(_) => return results,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+            if suffix.is_empty() || file_name.ends_with(suffix) {
+                results.push(path);
+            }
+        }
+    }
+
+    // Sort for deterministic output.
+    results.sort();
+    results
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
-    fn test_scan_installed_packages_phase1_stub() {
+    fn test_scan_installed_packages_empty_when_no_installed_dir() {
         let result = scan_installed_packages();
+        // Phase 1: no SDK installed yet -> should be empty.
         assert!(result.is_empty());
     }
 
@@ -52,5 +152,37 @@ mod tests {
         };
         assert_eq!(ps.package_name, "test");
         assert!(ps.include_dirs.is_empty());
+    }
+
+    #[test]
+    fn test_expand_simple_glob() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        // Create Dir/Sub/file.c and Dir/Sub/file.h
+        let sub = root.join("Dir").join("Sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("file.c"), b"int x;").unwrap();
+        fs::write(sub.join("file.h"), b"// header").unwrap();
+
+        // Pattern "Dir/Sub/*.c" should match only file.c
+        let result = expand_simple_glob(&root, "Dir/Sub/*.c");
+        assert_eq!(result.len(), 1);
+        assert!(result[0].ends_with("file.c"));
+    }
+
+    #[test]
+    fn test_expand_simple_glob_match_all_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let sub = root.join("src");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("a.c"), b"int a;").unwrap();
+        fs::write(sub.join("b.asm"), b".text").unwrap();
+
+        // Pattern "src/*" should match all files
+        let result = expand_simple_glob(&root, "src/*");
+        assert_eq!(result.len(), 2);
     }
 }

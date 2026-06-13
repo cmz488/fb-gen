@@ -1859,7 +1859,7 @@ pub fn cmd_install(
 
     // ── --list: show available packages ──
     if list {
-        println!("  Available packages:");
+        println!("  Available packages (hard-coded):");
         println!();
         for pkg in install::catalogue::CATALOGUE {
             // Filter by kind if specified.
@@ -1883,6 +1883,30 @@ pub fn cmd_install(
                 pkg.id, arch_str, pkg.version, pkg.name
             );
         }
+
+        // Also fetch and list remote packages.
+        if let Some(remote_pkgs) = install::manifest::fetch_manifest(None) {
+            println!();
+            println!("  Available packages (remote):");
+            println!();
+            for rp in &remote_pkgs {
+                // Filter by kind if specified (remote packages are always Toolchain for now).
+                if let Some(ref k) = kind {
+                    if !"toolchain".eq_ignore_ascii_case(k) {
+                        continue;
+                    }
+                }
+                let arch_str = rp
+                    .arch
+                    .as_deref()
+                    .unwrap_or("\u{2014}");
+                println!(
+                    "  {:30} {:15} v{}  ({})",
+                    rp.id, arch_str, rp.version, rp.name
+                );
+            }
+        }
+
         println!();
         return Ok(());
     }
@@ -1947,16 +1971,57 @@ pub fn cmd_install(
                 true
             };
             arch_match && kind_match
-        })
-        .ok_or_else(|| {
-            FbGenError::Config(format!(
-                "No package found for arch '{}'{}. Run `fb-gen install --list`.",
-                arch_filter,
-                kind_filter
-                    .map(|k| format!(" kind '{}'", k))
-                    .unwrap_or_default()
-            ))
-        })?;
+        });
+
+    // If not found in hard-coded catalogue, try remote manifest.
+    let pkg: &install::catalogue::Package = if let Some(found) = pkg {
+        found
+    } else {
+        match install::manifest::fetch_manifest(None) {
+            Some(remote_pkgs) => {
+                let remote_match = remote_pkgs.iter().find(|rp| {
+                    let arch_match = rp
+                        .arch
+                        .as_deref()
+                        .map(|a| a.to_lowercase().contains(&arch_filter.to_lowercase()))
+                        .unwrap_or(false);
+                    let kind_match = kind_filter
+                        .as_ref()
+                        .map(|kf| "toolchain".contains(kf.as_str()))
+                        .unwrap_or(true);
+                    arch_match && kind_match
+                });
+                match remote_match {
+                    Some(rp) => {
+                        // Leak the remote package into a static Package for the installer.
+                        // This is a one-shot CLI command — leaked memory is reclaimed on exit.
+                        let leaked: &install::catalogue::Package =
+                            Box::leak(Box::new(install::manifest::remote_to_package(rp)));
+                        leaked
+                    }
+                    None => {
+                        return Err(FbGenError::Config(format!(
+                            "No package found for arch '{}'{}. Run `fb-gen install --list`.",
+                            arch_filter,
+                            kind_filter
+                                .map(|k| format!(" kind '{}'", k))
+                                .unwrap_or_default()
+                        )));
+                    }
+                }
+            }
+            None => {
+                return Err(FbGenError::Config(format!(
+                    "No package found for arch '{}'{} and remote manifest unavailable. \
+                     Run `fb-gen install --list`.",
+                    arch_filter,
+                    kind_filter
+                        .map(|k| format!(" kind '{}'", k))
+                        .unwrap_or_default()
+                )));
+            }
+        }
+    };
 
     reporter.report_info(&format!(
         "Installing {} v{} ...",

@@ -20,8 +20,13 @@ pub enum TargetArch {
     ARM64,
     ARM32,
     RISCV64,
+    /// 32-bit RISC-V (e.g. ESP32-C3/C6/H2/P4).
+    RISCV32,
     WASM,
+    /// ARM Cortex-M bare-metal (arm-none-eabi).
     NoneEabi,
+    /// Xtensa (e.g. ESP32, ESP32-S2, ESP32-S3).
+    Xtensa,
     Custom(String),
 }
 
@@ -48,10 +53,20 @@ pub struct ToolchainConfig {
     pub float_abi: String,
 
     /// FPU unit (e.g. "fpv4-sp-d16", "fpv5-d16"). Skipped when empty.
-    /// Generates the `-mfpu=` flag.
+    /// Generates the `-mfpu=` flag. ARM-only.
     pub fpu: String,
 
-    /// Raw compiler/linker flags (e.g. "-mthumb", "-march=rv32imac").
+    /// RISC-V architecture string (e.g. "rv32imac", "rv64gc").
+    /// Generates the `-march=` flag. RISC-V only; ignored for ARM / Xtensa.
+    #[serde(default)]
+    pub march: String,
+
+    /// RISC-V ABI string (e.g. "ilp32", "lp64").
+    /// Generates the `-mabi=` flag. RISC-V only; ignored for ARM / Xtensa.
+    #[serde(default)]
+    pub mabi: String,
+
+    /// Raw compiler/linker flags (e.g. "-mthumb", "-mlongcalls").
     /// Appended verbatim to TARGET_FLAGS.
     pub extra_flags: String,
 
@@ -84,6 +99,8 @@ impl Default for ToolchainConfig {
             cpu: String::new(),
             float_abi: String::new(),
             fpu: String::new(),
+            march: String::new(),
+            mabi: String::new(),
             extra_flags: String::new(),
             prefix: String::new(),
             sysroot: None,

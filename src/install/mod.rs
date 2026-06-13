@@ -8,6 +8,7 @@ pub mod bridge;
 pub mod catalogue;
 pub mod downloader;
 pub mod environment;
+pub mod manifest;
 
 use crate::models::{FbGenError, FbGenResult};
 use catalogue::Package;

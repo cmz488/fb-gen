@@ -152,6 +152,12 @@ target_compile_definitions({{ target_name }} PRIVATE
 "#;
 
 /// `cmake/toolchain.cmake` template for embedded cross-compilation.
+///
+/// Uses Tera conditionals on `arch_family` to emit the right compiler/linker
+/// flags for each architecture family:
+/// - `arm`  — ARM Cortex-M / Linux ARM  (`-mcpu=`, `-mfloat-abi=`, `-mfpu=`, `--specs=nano.specs`)
+/// - `riscv` — RISC-V 32/64              (`-march=`, `-mabi=`)
+/// - `xtensa` — Xtensa (ESP32)           (`-mlongcalls` recommended)
 const TOOLCHAIN_TEMPLATE: &str = r#"# Auto-generated toolchain file by fb-gen
 
 set(CMAKE_SYSTEM_NAME               {{ system_name }})
@@ -167,7 +173,7 @@ set(TOOLCHAIN_PREFIX                {{ prefix }})
 set(CMAKE_C_COMPILER                ${TOOLCHAIN_PREFIX}gcc)
 set(CMAKE_ASM_COMPILER              ${CMAKE_C_COMPILER})
 set(CMAKE_CXX_COMPILER              ${TOOLCHAIN_PREFIX}g++)
-set(CMAKE_LINKER                    ${TOOLCHAIN_PREFIX}g++)
+set(CMAKE_LINKER                    ${TOOLCHAIN_PREFIX}{{ linker }})
 set(CMAKE_OBJCOPY                   ${TOOLCHAIN_PREFIX}objcopy)
 set(CMAKE_SIZE                      ${TOOLCHAIN_PREFIX}size)
 
@@ -203,11 +209,33 @@ set(CMAKE_CXX_FLAGS_RELEASE "-Os -g0")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -fno-rtti -fno-exceptions -fno-threadsafe-statics")
 
+{% if arch_family == "arm" -%}
+# ── ARM linker flags ──────────────────────────────────────────
 set(CMAKE_EXE_LINKER_FLAGS "${TARGET_FLAGS}")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --specs=nano.specs")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-Map=${CMAKE_PROJECT_NAME}.map -Wl,--gc-sections")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--print-memory-usage")
 set(TOOLCHAIN_LINK_LIBRARIES "m")
+{% elif arch_family == "riscv" -%}
+# ── RISC-V linker flags ───────────────────────────────────────
+set(CMAKE_EXE_LINKER_FLAGS "${TARGET_FLAGS}")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -nostartfiles --specs=nosys.specs")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-Map=${CMAKE_PROJECT_NAME}.map -Wl,--gc-sections")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--print-memory-usage")
+set(TOOLCHAIN_LINK_LIBRARIES "m")
+{% elif arch_family == "xtensa" -%}
+# ── Xtensa linker flags ───────────────────────────────────────
+set(CMAKE_EXE_LINKER_FLAGS "${TARGET_FLAGS}")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -nostdlib")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-Map=${CMAKE_PROJECT_NAME}.map -Wl,--gc-sections")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--print-memory-usage")
+set(TOOLCHAIN_LINK_LIBRARIES "m")
+{% else -%}
+set(CMAKE_EXE_LINKER_FLAGS "${TARGET_FLAGS}")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-Map=${CMAKE_PROJECT_NAME}.map -Wl,--gc-sections")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--print-memory-usage")
+set(TOOLCHAIN_LINK_LIBRARIES "m")
+{% endif -%}
 
 # ── User customisations ──────────────────────────────────────────
 # USER_START
@@ -660,23 +688,36 @@ impl CMakeGenerator {
             ));
         }
 
+        // RISCV32 MUST have march specified.
+        if matches!(&self.config.target_arch, TargetArch::RISCV32) && tc.march.is_empty() {
+            return Err(FbGenError::Config(
+                "RISC-V architecture string (-march=) is required for RISCV32 targets. \
+                 Run `fb-gen init` to configure."
+                    .into(),
+            ));
+        }
+
         match &self.config.target_arch {
             TargetArch::NoneEabi => Ok(Some(self.render_arm_eabi_toolchain(tc)?)),
             TargetArch::ARM32 => {
                 if tc.prefix.is_empty() {
                     Ok(None)
                 } else {
-                    Ok(Some(self.render_embedded_toolchain("Linux", "arm", &tc.prefix, tc)?))
+                    // Linux userspace cross-compilation — keep g++ linker.
+                    Ok(Some(self.render_embedded_toolchain("Linux", "arm", "arm", "g++", &tc.prefix, tc)?))
                 }
             }
             TargetArch::ARM64 => {
                 if tc.prefix.is_empty() {
                     Ok(None)
                 } else {
-                    Ok(Some(self.render_embedded_toolchain("Linux", "aarch64", &tc.prefix, tc)?))
+                    // Linux userspace cross-compilation — keep g++ linker.
+                    Ok(Some(self.render_embedded_toolchain("Linux", "aarch64", "arm", "g++", &tc.prefix, tc)?))
                 }
             }
             TargetArch::RISCV64 => Ok(Some(self.render_riscv64_toolchain(tc)?)),
+            TargetArch::RISCV32 => Ok(Some(self.render_riscv32_toolchain(tc)?)),
+            TargetArch::Xtensa => Ok(Some(self.render_xtensa_toolchain(tc)?)),
             _ => Ok(None),
         }
     }
@@ -758,36 +799,86 @@ impl CMakeGenerator {
     // ── Toolchain rendering methods ─────────────────────────────────────
 
     /// Render a complete toolchain.cmake for ARM Cortex-M bare-metal targets
-    /// (arm-none-eabi-gcc).
+    /// (arm-none-eabi-gcc).  Uses `gcc` as the linker (bare-metal standard).
     fn render_arm_eabi_toolchain(&self, tc: &ToolchainConfig) -> FbGenResult<String> {
         let prefix = if tc.prefix.is_empty() { "arm-none-eabi-" } else { &tc.prefix };
-        self.render_embedded_toolchain("Generic", "arm", prefix, tc)
+        self.render_embedded_toolchain("Generic", "arm", "arm", "gcc", prefix, tc)
     }
 
+    /// Render a complete toolchain.cmake for 64-bit RISC-V targets
+    /// (riscv64-unknown-elf-gcc).  Uses `gcc` as the linker (bare-metal standard).
     fn render_riscv64_toolchain(&self, tc: &ToolchainConfig) -> FbGenResult<String> {
         let prefix = if tc.prefix.is_empty() { "riscv64-unknown-elf-" } else { &tc.prefix };
-        self.render_embedded_toolchain("Generic", "riscv64", prefix, tc)
+        self.render_embedded_toolchain("Generic", "riscv64", "riscv", "gcc", prefix, tc)
+    }
+
+    /// Render a complete toolchain.cmake for 32-bit RISC-V targets
+    /// (riscv32-esp-elf-gcc / riscv32-unknown-elf-gcc), e.g. ESP32-C3/C6/H2/P4.
+    /// Uses `gcc` as the linker (bare-metal standard).
+    fn render_riscv32_toolchain(&self, tc: &ToolchainConfig) -> FbGenResult<String> {
+        let prefix = if tc.prefix.is_empty() { "riscv32-unknown-elf-" } else { &tc.prefix };
+        self.render_embedded_toolchain("Generic", "riscv32", "riscv", "gcc", prefix, tc)
+    }
+
+    /// Render a complete toolchain.cmake for Xtensa targets
+    /// (xtensa-esp32-elf-gcc), e.g. ESP32 / ESP32-S2 / ESP32-S3.
+    /// Uses `gcc` as the linker (bare-metal standard).
+    fn render_xtensa_toolchain(&self, tc: &ToolchainConfig) -> FbGenResult<String> {
+        let prefix = if tc.prefix.is_empty() { "xtensa-esp32-elf-" } else { &tc.prefix };
+        self.render_embedded_toolchain("Generic", "xtensa", "xtensa", "gcc", prefix, tc)
     }
 
     /// Render a complete CMake toolchain file using Tera templating.
+    ///
+    /// `arch_family` drives Tera conditionals in the template:
+    /// - `"arm"`    → `-mcpu=`, `-mfloat-abi=`, `-mfpu=`, `--specs=nano.specs`
+    /// - `"riscv"`  → `-march=`, `-mabi=`
+    /// - `"xtensa"` → Xtensa-specific defaults (`-mlongcalls` per ESP-IDF standard)
+    ///
+    /// `linker` is `"gcc"` for bare-metal targets (ARM Cortex-M, RISC-V, Xtensa)
+    /// and `"g++"` for Linux userspace cross-compilation (ARM32/ARM64).
     fn render_embedded_toolchain(
         &self,
         system_name: &str,
         processor: &str,
+        arch_family: &str,
+        linker: &str,
         prefix: &str,
         tc: &ToolchainConfig,
     ) -> FbGenResult<String> {
-        // Assemble TARGET_FLAGS from structured fields.
+        // Assemble TARGET_FLAGS from structured fields, varying by arch family.
         let mut flags: Vec<String> = Vec::new();
-        if !tc.cpu.is_empty() {
-            flags.push(format!("-mcpu={}", tc.cpu));
+
+        match arch_family {
+            "arm" => {
+                if !tc.cpu.is_empty() {
+                    flags.push(format!("-mcpu={}", tc.cpu));
+                }
+                if !tc.float_abi.is_empty() {
+                    flags.push(format!("-mfloat-abi={}", tc.float_abi));
+                }
+                if !tc.fpu.is_empty() {
+                    flags.push(format!("-mfpu={}", tc.fpu));
+                }
+            }
+            "riscv" => {
+                if !tc.march.is_empty() {
+                    flags.push(format!("-march={}", tc.march));
+                }
+                if !tc.mabi.is_empty() {
+                    flags.push(format!("-mabi={}", tc.mabi));
+                }
+            }
+            // Xtensa: ESP-IDF standard flags for bare-metal ESP32.
+            "xtensa" => {
+                // -mlongcalls: enables 32-bit call instructions.
+                // Required because Xtensa's default call range is ±128 KiB;
+                // larger binaries need this to reach across .text sections.
+                flags.push("-mlongcalls".into());
+            }
+            _ => {}
         }
-        if !tc.float_abi.is_empty() {
-            flags.push(format!("-mfloat-abi={}", tc.float_abi));
-        }
-        if !tc.fpu.is_empty() {
-            flags.push(format!("-mfpu={}", tc.fpu));
-        }
+
         if !tc.extra_flags.is_empty() {
             flags.push(tc.extra_flags.clone());
         }
@@ -802,6 +893,8 @@ impl CMakeGenerator {
         let mut ctx = Context::new();
         ctx.insert("system_name", system_name);
         ctx.insert("processor", processor);
+        ctx.insert("arch_family", arch_family);
+        ctx.insert("linker", linker);
         ctx.insert("prefix", prefix);
         ctx.insert("target_flags", &target_flags);
         ctx.insert("sysroot", &tc.sysroot);
@@ -974,6 +1067,24 @@ fn cross_compile_context(
             "riscv64-unknown-elf-gcc".into(),
             String::new(),
         ),
+        TargetArch::RISCV32 => (
+            true,
+            "Generic".into(),
+            "riscv32".into(),
+            "riscv32-unknown-elf-gcc".into(),
+            "riscv32-unknown-elf-g++".into(),
+            "riscv32-unknown-elf-gcc".into(),
+            String::new(),
+        ),
+        TargetArch::Xtensa => (
+            true,
+            "Generic".into(),
+            "xtensa".into(),
+            "xtensa-esp32-elf-gcc".into(),
+            "xtensa-esp32-elf-g++".into(),
+            "xtensa-esp32-elf-gcc".into(),
+            String::new(),
+        ),
         TargetArch::WASM => (
             true,
             "Generic".into(),
@@ -1141,5 +1252,25 @@ mod tests {
         assert!(is_cross);
         assert_eq!(_proc, "arm");
         assert_eq!(_cc, "arm-none-eabi-gcc");
+    }
+
+    #[test]
+    fn test_cross_compile_context_riscv32() {
+        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) =
+            cross_compile_context(&TargetArch::RISCV32);
+        assert!(is_cross);
+        assert_eq!(_proc, "riscv32");
+        assert_eq!(_cc, "riscv32-unknown-elf-gcc");
+        assert_eq!(_cxx, "riscv32-unknown-elf-g++");
+    }
+
+    #[test]
+    fn test_cross_compile_context_xtensa() {
+        let (is_cross, _name, _proc, _cc, _cxx, _asm, _ld) =
+            cross_compile_context(&TargetArch::Xtensa);
+        assert!(is_cross);
+        assert_eq!(_proc, "xtensa");
+        assert_eq!(_cc, "xtensa-esp32-elf-gcc");
+        assert_eq!(_cxx, "xtensa-esp32-elf-g++");
     }
 }

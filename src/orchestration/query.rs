@@ -82,15 +82,17 @@ impl UserQuery {
         // ── target architecture ───────────────────────────────────
         println!();
         println!("  Target architecture:");
-        println!("    1) x86_64  (default)");
+        println!("    1) x86_64    (default)");
         println!("    2) x86");
         println!("    3) ARM64");
         println!("    4) ARM32");
         println!("    5) RISC-V 64");
-        println!("    6) WASM");
-        println!("    7) None-EABI");
-        println!("    8) Custom");
-        let arch_choice = prompt_with_default("Choose architecture [1-8]", "1").map_err(|e| {
+        println!("    6) RISC-V 32 (e.g. ESP32-C3/C6/H2/P4)");
+        println!("    7) WASM");
+        println!("    8) None-EABI (ARM Cortex-M)");
+        println!("    9) Xtensa    (e.g. ESP32/ESP32-S2/ESP32-S3)");
+        println!("    10) Custom");
+        let arch_choice = prompt_with_default("Choose architecture [1-10]", "1").map_err(|e| {
             crate::models::FbGenError::Config(format!("failed to read architecture: {e}"))
         })?;
         let target_arch = match arch_choice.as_str() {
@@ -98,9 +100,11 @@ impl UserQuery {
             "3" => TargetArch::ARM64,
             "4" => TargetArch::ARM32,
             "5" => TargetArch::RISCV64,
-            "6" => TargetArch::WASM,
-            "7" => TargetArch::NoneEabi,
-            "8" => {
+            "6" => TargetArch::RISCV32,
+            "7" => TargetArch::WASM,
+            "8" => TargetArch::NoneEabi,
+            "9" => TargetArch::Xtensa,
+            "10" => {
                 let custom = prompt("  Custom architecture name: ").map_err(|e| {
                     crate::models::FbGenError::Config(format!("failed to read custom arch: {e}"))
                 })?;
@@ -112,7 +116,7 @@ impl UserQuery {
         // ── Toolchain config (cross-compile targets) ───────────────
         let mut toolchain: Option<crate::models::project::ToolchainConfig> = None;
 
-        if matches!(target_arch, TargetArch::NoneEabi | TargetArch::ARM32 | TargetArch::ARM64 | TargetArch::RISCV64) {
+        if matches!(target_arch, TargetArch::NoneEabi | TargetArch::ARM32 | TargetArch::ARM64 | TargetArch::RISCV64 | TargetArch::RISCV32 | TargetArch::Xtensa) {
             let detected = crate::core::detect_toolchains();
 
             // Filter to toolchains compatible with the chosen architecture.
@@ -121,7 +125,7 @@ impl UserQuery {
                 .filter(|dt| dt.suggested_arch == target_arch)
                 .collect();
 
-            let ask_mcu_cpu = || -> FbGenResult<(String, String, String, String)> {
+            let ask_mcu_cpu = || -> FbGenResult<(String, String, String, String, String, String)> {
                 if matches!(target_arch, TargetArch::NoneEabi) {
                     println!();
                     println!("  ARM MCU/CPU selection:");
@@ -145,9 +149,54 @@ impl UserQuery {
                     ).map_err(|e| {
                         crate::models::FbGenError::Config(format!("failed to read extra flags: {e}"))
                     })?;
-                    Ok((cpu, float_abi, fpu, extra_flags))
+                    Ok((cpu, float_abi, fpu, extra_flags, String::new(), String::new()))
+                } else if matches!(target_arch, TargetArch::RISCV32 | TargetArch::RISCV64) {
+                    println!();
+                    println!("  RISC-V architecture selection:");
+                    println!("    Specify -march= value (e.g. rv32imac, rv64gc).");
+                    let march = prompt_with_default(
+                        if matches!(target_arch, TargetArch::RISCV32) {
+                            "  -march= [rv32imac]"
+                        } else {
+                            "  -march= [rv64gc]"
+                        },
+                        if matches!(target_arch, TargetArch::RISCV32) { "rv32imac" } else { "rv64gc" },
+                    ).map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read march: {e}"))
+                    })?;
+                    let mabi = prompt_with_default(
+                        if matches!(target_arch, TargetArch::RISCV32) {
+                            "  -mabi= [ilp32]"
+                        } else {
+                            "  -mabi= [lp64d]"
+                        },
+                        if matches!(target_arch, TargetArch::RISCV32) { "ilp32" } else { "lp64d" },
+                    ).map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read mabi: {e}"))
+                    })?;
+                    let extra_flags = prompt_with_default(
+                        "  Extra flags (empty to skip) []", ""
+                    ).map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read extra flags: {e}"))
+                    })?;
+                    Ok((String::new(), String::new(), String::new(), extra_flags, march, mabi))
+                } else if matches!(target_arch, TargetArch::Xtensa) {
+                    println!();
+                    println!("  Xtensa (ESP32) toolchain:");
+                    println!("    Built-in flags: -mlongcalls (per ESP-IDF standard)");
+                    let extra_flags = prompt_with_default(
+                        "  Extra flags (empty to skip) []", ""
+                    ).map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read extra flags: {e}"))
+                    })?;
+                    Ok((String::new(), String::new(), String::new(), extra_flags, String::new(), String::new()))
                 } else {
-                    Ok((String::new(), String::new(), String::new(), String::new()))
+                    let extra_flags = prompt_with_default(
+                        "  Extra flags (empty to skip) []", ""
+                    ).map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read extra flags: {e}"))
+                    })?;
+                    Ok((String::new(), String::new(), String::new(), extra_flags, String::new(), String::new()))
                 }
             };
 
@@ -299,6 +348,8 @@ impl UserQuery {
                     TargetArch::ARM32 => "arm-linux-gnueabihf-",
                     TargetArch::ARM64 => "aarch64-none-elf-",
                     TargetArch::RISCV64 => "riscv64-unknown-elf-",
+                    TargetArch::RISCV32 => "riscv32-esp-elf-",
+                    TargetArch::Xtensa => "xtensa-esp32-elf-",
                     _ => "",
                 };
                 let prefix = prompt_with_default(
@@ -325,7 +376,7 @@ impl UserQuery {
                     .map(String::from)
                     .collect();
 
-                let (cpu, float_abi, fpu, extra_flags) = ask_mcu_cpu()?;
+                let (cpu, float_abi, fpu, extra_flags, march, mabi) = ask_mcu_cpu()?;
 
                 // ── Device defines ──
                 let device_defines = ask_device_defines()?;
@@ -334,6 +385,8 @@ impl UserQuery {
                     cpu,
                     float_abi,
                     fpu,
+                    march,
+                    mabi,
                     extra_flags,
                     prefix,
                     sysroot,
@@ -381,6 +434,8 @@ impl UserQuery {
                             TargetArch::ARM32 => "arm-linux-gnueabihf-",
                             TargetArch::ARM64 => "aarch64-none-elf-",
                             TargetArch::RISCV64 => "riscv64-unknown-elf-",
+                            TargetArch::RISCV32 => "riscv32-esp-elf-",
+                            TargetArch::Xtensa => "xtensa-esp32-elf-",
                             _ => "arm-none-eabi-",
                         };
                         let prefix = prompt_with_default("  Toolchain prefix", default_prefix)
@@ -408,7 +463,7 @@ impl UserQuery {
                     ("arm-none-eabi-".into(), None, Vec::new())
                 };
 
-                let (cpu, float_abi, fpu, extra_flags) = ask_mcu_cpu()?;
+                let (cpu, float_abi, fpu, extra_flags, march, mabi) = ask_mcu_cpu()?;
 
                 // ── Device defines ──
                 let device_defines = ask_device_defines()?;
@@ -417,6 +472,8 @@ impl UserQuery {
                     cpu,
                     float_abi,
                     fpu,
+                    march,
+                    mabi,
                     extra_flags,
                     prefix,
                     sysroot,
