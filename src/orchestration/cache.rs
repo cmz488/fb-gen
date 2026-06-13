@@ -238,6 +238,7 @@ impl MetaCache {
             dependency_graph,
             file_checksums,
             last_sync,
+            installed_packages_hash: String::new(),
         })
     }
 
@@ -327,6 +328,7 @@ mod tests {
             },
             file_checksums: HashMap::new(),
             last_sync: "2025-01-01T00:00:00Z".into(),
+            installed_packages_hash: String::new(),
         }
     }
 

@@ -125,6 +125,22 @@ fn inject_installed_packages(
         return 0;
     }
 
+    // Find target module first.
+    let target_idx = modules
+        .iter()
+        .position(|m| m.has_main)
+        .or_else(|| modules.iter().position(|m| m.is_root));
+
+    let target = match target_idx {
+        Some(idx) => &mut modules[idx],
+        None => {
+            // No module to inject into — report and return 0.
+            reporter.report_warning("No target module found for SDK injection");
+            return 0;
+        }
+    };
+
+    let mut injected = 0;
     for pkg in &packages {
         reporter.report_info(&format!(
             "Injecting installed SDK: {} ({} include dirs, {} source files)",
@@ -133,56 +149,63 @@ fn inject_installed_packages(
             pkg.source_files.len(),
         ));
 
-        // Inject into the first executable module (or root if none).
-        let target_idx = modules
-            .iter()
-            .position(|m| m.has_main)
-            .or_else(|| modules.iter().position(|m| m.is_root))
-            .unwrap_or(0);
-
-        let target = if target_idx < modules.len() {
-            Some(&mut modules[target_idx])
-        } else {
-            None
-        };
-
-        if let Some(module) = target {
-            // Add include directories.
-            for inc_dir in &pkg.include_dirs {
-                if !module.include_dirs.contains(inc_dir) {
-                    module.include_dirs.push(inc_dir.clone());
-                }
-            }
-
-            // Add compile definitions.
-            for def in &pkg.compile_defines {
-                if !module.compile_definitions.contains(def) {
-                    module.compile_definitions.push(def.clone());
-                }
-            }
-
-            // Convert source files to synthetic SourceFile entries.
-            for src_path in &pkg.source_files {
-                let sf = SourceFile {
-                    path: src_path.clone(),
-                    relative_path: src_path.clone(),
-                    file_name: src_path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned(),
-                    source_type: crate::models::module::SourceType::from_extension(
-                        src_path.extension().unwrap_or_default().to_str().unwrap_or("c"),
-                    ),
-                    includes: Vec::new(),
-                    size_bytes: 0,
-                };
-                module.sources.push(sf);
+        // Add include directories.
+        for inc_dir in &pkg.include_dirs {
+            if !target.include_dirs.contains(inc_dir) {
+                target.include_dirs.push(inc_dir.clone());
             }
         }
+
+        // Add compile definitions.
+        for def in &pkg.compile_defines {
+            if !target.compile_definitions.contains(def) {
+                target.compile_definitions.push(def.clone());
+            }
+        }
+
+        // Convert source files to synthetic SourceFile entries.
+        for src_path in &pkg.source_files {
+            let sf = SourceFile {
+                path: src_path.clone(),
+                relative_path: src_path.clone(),
+                file_name: src_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                source_type: crate::models::module::SourceType::from_extension(
+                    src_path.extension().unwrap_or_default().to_str().unwrap_or("c"),
+                ),
+                includes: Vec::new(),
+                size_bytes: 0,
+            };
+            target.sources.push(sf);
+        }
+
+        injected += 1;
     }
 
-    packages.len()
+    injected
+}
+
+/// Compute a hash of `<root>/.fb-gen/cache/installed_packages.json`.
+///
+/// Returns an empty string when the marker file does not exist (no packages
+/// have ever been installed for this project, or project hasn't been init-ed).
+fn compute_installed_packages_hash(root: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let marker_path = root
+        .join(".fb-gen")
+        .join("cache")
+        .join("installed_packages.json");
+    match std::fs::read(&marker_path) {
+        Ok(data) => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            data.hash(&mut hasher);
+            format!("{:016x}", hasher.finish())
+        }
+        Err(_) => String::new(),
+    }
 }
 
 /// Run the full scan → discover → analyze pipeline. Returns modules + optional dep graph.
@@ -261,7 +284,8 @@ fn check_required_tools(config: &ProjectConfig, reporter: &Reporter) {
     // ── Compiler ──────────────────────────────────────────────────────
     use crate::models::project::{Compiler, TargetArch};
     let compiler_name = match &config.target_arch {
-        TargetArch::NoneEabi | TargetArch::ARM32 | TargetArch::ARM64 | TargetArch::RISCV64 => {
+        TargetArch::NoneEabi | TargetArch::ARM32 | TargetArch::ARM64
+        | TargetArch::RISCV64 | TargetArch::RISCV32 | TargetArch::Xtensa => {
             // Cross-compilation: check the toolchain prefix if configured.
             match &config.toolchain {
                 Some(tc) if !tc.prefix.is_empty() => {
@@ -524,12 +548,15 @@ fn save_sync_result(
             .collect(),
     };
 
+    let installed_packages_hash = compute_installed_packages_hash(&config.root);
+
     let meta = ProjectMeta {
         config: config.clone(),
         modules: prev_meta.modules.clone(),
         dependency_graph: dep_snapshot,
         file_checksums: prev_meta.file_checksums.clone(),
         last_sync: chrono::Utc::now().to_rfc3339(),
+        installed_packages_hash,
     };
     cache.save(&meta)
 }
@@ -1158,12 +1185,15 @@ fn save_meta_cache(
         }
     };
 
+    let installed_packages_hash = compute_installed_packages_hash(root);
+
     let meta = ProjectMeta {
         config: config.clone(),
         modules: modules.to_vec(),
         dependency_graph: dep_snapshot,
         file_checksums: checksums,
         last_sync: chrono::Utc::now().to_rfc3339(),
+        installed_packages_hash,
     };
     cache.save(&meta)
 }
@@ -1389,12 +1419,15 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
                 match do_incremental_sync(&root, &mut config, &mut prev_meta, &reporter) {
                     Ok(n) if n > 0 => {
                         // Persist updated metadata.
+                        let installed_packages_hash =
+                            compute_installed_packages_hash(&root);
                         let meta = ProjectMeta {
                             config: config.clone(),
                             modules: prev_meta.modules,
                             dependency_graph: prev_meta.dependency_graph,
                             file_checksums: prev_meta.file_checksums,
                             last_sync: chrono::Utc::now().to_rfc3339(),
+                            installed_packages_hash,
                         };
                         if let Err(e) = cache.save(&meta) {
                             reporter.report_warning(&format!(
@@ -1956,11 +1989,7 @@ pub fn cmd_install(
         for pkg in install::catalogue::CATALOGUE {
             // Filter by kind if specified.
             if let Some(ref k) = kind {
-                let kind_str = match pkg.kind {
-                    install::catalogue::PackageKind::Toolchain => "toolchain",
-                    install::catalogue::PackageKind::McuSdk => "sdk",
-                    install::catalogue::PackageKind::Middleware => "middleware",
-                };
+                let kind_str = pkg.kind.as_str();
                 if !kind_str.eq_ignore_ascii_case(k) {
                     continue;
                 }
@@ -2006,8 +2035,10 @@ pub fn cmd_install(
     // ── --list-installed: show installed packages ──
     if list_installed {
         let root = install::resolve_install_root();
-        let installed_dir = root.join("installed");
-        if !installed_dir.exists() {
+
+        let records = install::environment::read_installed_records(&root);
+
+        if records.is_empty() {
             println!("  No packages installed yet.");
             return Ok(());
         }
@@ -2015,32 +2046,7 @@ pub fn cmd_install(
         println!("  Installed packages:");
         println!();
 
-        // Collect all installed records.
-        let mut records: Vec<install::environment::InstalledRecord> = Vec::new();
-        for entry in std::fs::read_dir(&installed_dir)
-            .map_err(|e| {
-                FbGenError::Config(format!("Failed to read installed dir: {e}"))
-            })?
-            .flatten()
-        {
-            if entry.path().extension().map_or(false, |e| e == "json") {
-                let content =
-                    std::fs::read_to_string(entry.path()).unwrap_or_default();
-                if let Ok(record) =
-                    serde_json::from_str::<install::environment::InstalledRecord>(
-                        &content,
-                    )
-                {
-                    records.push(record);
-                }
-            }
-        }
-
-        if records.is_empty() {
-            println!("  No packages installed yet.");
-            return Ok(());
-        }
-
+        let mut records = records;
         // Sort by id then version.
         records.sort_by(|a, b| {
             a.id
@@ -2083,7 +2089,9 @@ pub fn cmd_install(
         .iter()
         .find(|p| {
             // Filter by arch.
-            let arch_match = if let Some(ref a) = p.arch {
+            let arch_match = if arch_filter.is_empty() {
+                true  // no filter → match everything
+            } else if let Some(ref a) = p.arch {
                 format!("{:?}", a)
                     .to_lowercase()
                     .contains(&arch_filter.to_lowercase())
@@ -2092,11 +2100,7 @@ pub fn cmd_install(
             };
             // Filter by kind if specified.
             let kind_match = if let Some(ref kf) = kind_filter {
-                let kind_str = match p.kind {
-                    install::catalogue::PackageKind::Toolchain => "toolchain",
-                    install::catalogue::PackageKind::McuSdk => "sdk",
-                    install::catalogue::PackageKind::Middleware => "middleware",
-                };
+                let kind_str = p.kind.as_str();
                 kind_str.contains(kf)
             } else {
                 true
@@ -2111,14 +2115,16 @@ pub fn cmd_install(
         match install::manifest::fetch_manifest(None) {
             Some(remote_pkgs) => {
                 let remote_match = remote_pkgs.iter().find(|rp| {
-                    let arch_match = rp
-                        .arch
-                        .as_deref()
-                        .map(|a| a.to_lowercase().contains(&arch_filter.to_lowercase()))
-                        .unwrap_or(false);
+                    let arch_match = arch_filter.is_empty()
+                        || rp.arch.as_deref()
+                            .map(|a| a.to_lowercase().contains(&arch_filter.to_lowercase()))
+                            .unwrap_or(false);
                     let kind_match = kind_filter
                         .as_ref()
-                        .map(|kf| "toolchain".contains(kf.as_str()))
+                        .map(|kf| {
+                            // Remote packages are toolchains by default in Phase 2.
+                            "toolchain".contains(kf.as_str())
+                        })
                         .unwrap_or(true);
                     arch_match && kind_match
                 });
