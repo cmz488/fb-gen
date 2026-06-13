@@ -204,7 +204,6 @@ set(CMAKE_CXX_FLAGS_RELEASE "-Os -g0")
 set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -fno-rtti -fno-exceptions -fno-threadsafe-statics")
 
 set(CMAKE_EXE_LINKER_FLAGS "${TARGET_FLAGS}")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}{{ ld_flag }}")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --specs=nano.specs")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-Map=${CMAKE_PROJECT_NAME}.map -Wl,--gc-sections")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--print-memory-usage")
@@ -259,8 +258,6 @@ impl CMakeGenerator {
         force: bool,
         user_modules: &[PathBuf],
     ) -> FbGenResult<()> {
-        let root_ld_scripts = detect_linker_scripts(&self.config.root);
-
         // ── Root CMakeLists.txt ────────────────────────────────────────
         let root_content = self.render_root(modules, graph, user_modules)?;
         let root_path = self.config.root.join("CMakeLists.txt");
@@ -271,7 +268,7 @@ impl CMakeGenerator {
         // one (e.g. from STM32CubeMX, CMakePresets, or manual setup).
         // Never overwrite a user-provided toolchain file.
         if !self.user_has_toolchain_file() {
-            if let Some(toolchain_content) = self.render_toolchain(&root_ld_scripts)? {
+            if let Some(toolchain_content) = self.render_toolchain()? {
                 let toolchain_path = self.config.root.join("cmake").join("toolchain.cmake");
                 // Ensure parent directory exists.
                 if let Some(parent) = toolchain_path.parent() {
@@ -314,8 +311,7 @@ impl CMakeGenerator {
     /// file is detected.  Used when `device_defines` have been configured and
     /// the preset must be switched to fb-gen's own toolchain file.
     pub fn force_generate_toolchain(&self) -> FbGenResult<()> {
-        let root_ld_scripts = detect_linker_scripts(&self.config.root);
-        if let Some(content) = self.render_toolchain(&root_ld_scripts)? {
+        if let Some(content) = self.render_toolchain()? {
             let path = self.config.root.join("cmake").join("toolchain.cmake");
             self.write_if_changed(&path, &content, "toolchain.cmake", true)?;
         }
@@ -639,7 +635,7 @@ impl CMakeGenerator {
     /// (ARM32, ARM64, X86_64, X86, WASM, Custom) or no ToolchainConfig is set.
     ///
     /// Returns `Err` if NoneEabi has no ToolchainConfig or the CPU field is empty.
-    fn render_toolchain(&self, root_ld_scripts: &[String]) -> FbGenResult<Option<String>> {
+    fn render_toolchain(&self) -> FbGenResult<Option<String>> {
         let tc = match &self.config.toolchain {
             Some(tc) => tc,
             None => {
@@ -665,22 +661,22 @@ impl CMakeGenerator {
         }
 
         match &self.config.target_arch {
-            TargetArch::NoneEabi => Ok(Some(self.render_arm_eabi_toolchain(tc, root_ld_scripts)?)),
+            TargetArch::NoneEabi => Ok(Some(self.render_arm_eabi_toolchain(tc)?)),
             TargetArch::ARM32 => {
                 if tc.prefix.is_empty() {
                     Ok(None)
                 } else {
-                    Ok(Some(self.render_embedded_toolchain("Linux", "arm", &tc.prefix, tc, root_ld_scripts)?))
+                    Ok(Some(self.render_embedded_toolchain("Linux", "arm", &tc.prefix, tc)?))
                 }
             }
             TargetArch::ARM64 => {
                 if tc.prefix.is_empty() {
                     Ok(None)
                 } else {
-                    Ok(Some(self.render_embedded_toolchain("Linux", "aarch64", &tc.prefix, tc, root_ld_scripts)?))
+                    Ok(Some(self.render_embedded_toolchain("Linux", "aarch64", &tc.prefix, tc)?))
                 }
             }
-            TargetArch::RISCV64 => Ok(Some(self.render_riscv64_toolchain(tc, root_ld_scripts)?)),
+            TargetArch::RISCV64 => Ok(Some(self.render_riscv64_toolchain(tc)?)),
             _ => Ok(None),
         }
     }
@@ -763,14 +759,14 @@ impl CMakeGenerator {
 
     /// Render a complete toolchain.cmake for ARM Cortex-M bare-metal targets
     /// (arm-none-eabi-gcc).
-    fn render_arm_eabi_toolchain(&self, tc: &ToolchainConfig, root_ld_scripts: &[String]) -> FbGenResult<String> {
+    fn render_arm_eabi_toolchain(&self, tc: &ToolchainConfig) -> FbGenResult<String> {
         let prefix = if tc.prefix.is_empty() { "arm-none-eabi-" } else { &tc.prefix };
-        self.render_embedded_toolchain("Generic", "arm", prefix, tc, root_ld_scripts)
+        self.render_embedded_toolchain("Generic", "arm", prefix, tc)
     }
 
-    fn render_riscv64_toolchain(&self, tc: &ToolchainConfig, root_ld_scripts: &[String]) -> FbGenResult<String> {
+    fn render_riscv64_toolchain(&self, tc: &ToolchainConfig) -> FbGenResult<String> {
         let prefix = if tc.prefix.is_empty() { "riscv64-unknown-elf-" } else { &tc.prefix };
-        self.render_embedded_toolchain("Generic", "riscv64", prefix, tc, root_ld_scripts)
+        self.render_embedded_toolchain("Generic", "riscv64", prefix, tc)
     }
 
     /// Render a complete CMake toolchain file using Tera templating.
@@ -780,7 +776,6 @@ impl CMakeGenerator {
         processor: &str,
         prefix: &str,
         tc: &ToolchainConfig,
-        root_ld_scripts: &[String],
     ) -> FbGenResult<String> {
         // Assemble TARGET_FLAGS from structured fields.
         let mut flags: Vec<String> = Vec::new();
@@ -804,18 +799,11 @@ impl CMakeGenerator {
         }
         let target_flags = flags.join(" ");
 
-        let ld_flag = if root_ld_scripts.len() == 1 {
-            format!(" -T ${{CMAKE_SOURCE_DIR}}/{}", root_ld_scripts[0])
-        } else {
-            String::new()
-        };
-
         let mut ctx = Context::new();
         ctx.insert("system_name", system_name);
         ctx.insert("processor", processor);
         ctx.insert("prefix", prefix);
         ctx.insert("target_flags", &target_flags);
-        ctx.insert("ld_flag", &ld_flag);
         ctx.insert("sysroot", &tc.sysroot);
         ctx.insert("find_root_path", &tc.find_root_path);
 
@@ -939,33 +927,6 @@ impl CMakeGenerator {
 
         Ok(())
     }
-}
-
-
-/// Scan the project root (non-recursive) for `.ld` linker scripts.
-///
-/// Returns the detected linker script file names (basenames only).
-/// When exactly one `.ld` file is found at the root, it is used in the
-/// toolchain file.  Zero or multiple `.ld` files → empty vec.
-fn detect_linker_scripts(root: &Path) -> Vec<String> {
-    let mut found: Vec<String> = Vec::new();
-    let entries = match std::fs::read_dir(root) {
-        Ok(e) => e,
-        Err(_) => return found,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if ext.eq_ignore_ascii_case("ld") {
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        found.push(name.to_string());
-                    }
-                }
-            }
-        }
-    }
-    if found.len() == 1 { found } else { Vec::new() }
 }
 
 // ── Cross-compilation helpers ──────────────────────────────────────────────

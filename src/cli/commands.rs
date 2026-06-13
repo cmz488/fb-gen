@@ -1,11 +1,14 @@
 //! CLI command implementations — wires scanner → discoverer → analyzer → generator.
 
 use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::LazyLock;
+use std::thread;
 use std::time::Instant;
 
+use colored::{Color, Colorize};
 use regex::Regex;
 
 use crate::cli::Cli;
@@ -1234,6 +1237,23 @@ pub fn cmd_validate(cli: &Cli) -> FbGenResult<()> {
 pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
     let reporter = Reporter::new(cli.quiet);
 
+    // ── CMAKE banner ──────────────────────────────────────────────────
+    // Gradient: bright-cyan → cyan → blue → bright-green → green
+    if !cli.quiet {
+        let banner: [(&str, Color); 6] = [
+            (" ████   █    █   ██████", Color::BrightCyan),
+            ("█    █  ██  ██      █",    Color::Cyan),
+            ("█       █ ██ █     █",    Color::BrightBlue),
+            ("█       █    █    █",     Color::Blue),
+            ("█    █  █    █   █",      Color::BrightGreen),
+            (" ████   █    █   ██████", Color::Green),
+        ];
+        for (line, color) in &banner {
+            println!("{}", line.color(*color).bold());
+        }
+        println!();
+    }
+
     // Ensure CMakeLists.txt are up to date first.
     let root = resolve_root(cli)?;
     let cache = MetaCache::new(&root);
@@ -1375,8 +1395,7 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
     if cli.lsp {
         cmd.arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
     }
-    let status = cmd
-        .status()
+    let (status, _cfg_lines) = run_cmake_formatted(&mut cmd, cli.quiet)
         .map_err(|e| FbGenError::Config(format!("cmake: {e}")))?;
 
     if !status.success() {
@@ -1405,15 +1424,27 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
     ));
     let start = Instant::now();
 
-    let status = Command::new("cmake")
-        .arg("--build")
-        .arg(&build_dir)
-        .status()
+    let mut build_cmd = Command::new("cmake");
+    build_cmd.arg("--build").arg(&build_dir);
+    let (status, build_lines) = run_cmake_formatted(&mut build_cmd, cli.quiet)
         .map_err(|e| FbGenError::Config(format!("cmake --build: {e}")))?;
 
     if status.success() {
         let elapsed = start.elapsed();
         reporter.report_success(&format!("Build succeeded in {:.1}s", elapsed.as_secs_f64()));
+
+        // Highlight memory/flash usage summary, if present.
+        if let Some(summary) = extract_memory_summary(&build_lines) {
+            if !cli.quiet {
+                println!(
+                    "\n{}",
+                    "──── Memory Usage ────".cyan().bold()
+                );
+                for line in summary.lines() {
+                    println!("  {}", format_cmake_line(line));
+                }
+            }
+        }
     } else {
         reporter.report_error("Build failed.");
         return Err(FbGenError::GenerationFailed("build failed".into()));
@@ -1486,6 +1517,198 @@ fn filter_overlapping_user_modules(
             true
         })
         .collect()
+}
+
+// ── CMake output formatting ─────────────────────────────────────────────────
+
+/// Format a single line of CMake build output with color based on its content.
+fn format_cmake_line(line: &str) -> String {
+    // Memory table header (arm-none-eabi-size output):
+    //   text    data     bss     dec     hex filename
+    if line.contains("text")
+        && line.contains("data")
+        && line.contains("bss")
+        && line.contains("dec")
+        && line.contains("hex")
+    {
+        return line.cyan().bold().to_string();
+    }
+
+    // Memory table data: whitespace-prefixed lines with 5+ numeric columns.
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() >= 5
+        && tokens[0].parse::<u64>().is_ok()
+        && tokens[1].parse::<u64>().is_ok()
+    {
+        return line.cyan().to_string();
+    }
+
+    // Custom memory region table (STM32CubeMX / GNU ld --print-memory-usage):
+    // Memory region         Used Size  Region Size  %age Used
+    if line.contains("Memory region") && line.contains("Used Size") {
+        return line.cyan().bold().to_string();
+    }
+
+    // Errors — highest visibility
+    if line.contains("error:")
+        || line.contains("Error:")
+        || line.contains("FAILED:")
+        || line.contains("ninja: build stopped:")
+    {
+        return line.red().bold().to_string();
+    }
+
+    // Warnings
+    if line.contains("warning:") || line.contains("Warning:") {
+        return line.yellow().to_string();
+    }
+
+    // Build progress: lines like "[42/128] Building C object ..." (Ninja)
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('[') && trimmed.contains(']') && trimmed.contains('/') {
+        return line.dimmed().to_string();
+    }
+
+    // Linking / success
+    if line.contains("Linking")
+        || line.contains("Built target")
+        || line == "Build succeeded."
+    {
+        return line.green().to_string();
+    }
+
+    // Normal lines: pass through unchanged
+    line.to_string()
+}
+
+/// Run a CMake command, piping stdout/stderr through the color formatter.
+///
+/// Streams lines in real-time while also collecting all lines into a
+/// `Vec<String>` for post-processing (e.g. memory-usage extraction).
+fn run_cmake_formatted(
+    cmd: &mut Command,
+    quiet: bool,
+) -> std::io::Result<(ExitStatus, Vec<String>)> {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let stdout = child.stdout.take().expect("stdout pipe configured");
+    let stderr = child.stderr.take().expect("stderr pipe configured");
+
+    let all_lines: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stderr_lines = std::sync::Arc::clone(&all_lines);
+
+    // Spawn a thread to read stderr; prevents deadlock when the child
+    // fills the stderr pipe buffer while the parent reads stdout.
+    let stderr_handle = thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for result in reader.lines() {
+            if let Ok(line) = result {
+                if !quiet {
+                    let formatted = format_cmake_line(&line);
+                    eprintln!("{formatted}");
+                }
+                stderr_lines
+                    .lock()
+                    .expect("lock stderr")
+                    .push(line);
+            }
+        }
+    });
+
+    // Read stdout in the main thread.
+    {
+        let reader = BufReader::new(stdout);
+        for result in reader.lines() {
+            if let Ok(line) = result {
+                if !quiet {
+                    let formatted = format_cmake_line(&line);
+                    println!("{formatted}");
+                }
+                all_lines
+                    .lock()
+                    .expect("lock stdout")
+                    .push(line);
+            }
+        }
+    }
+
+    // Wait for the child to exit, which guarantees both write ends of
+    // the pipes are closed and the stderr thread will finish.
+    let status = child.wait()?;
+
+    // Join the stderr reader thread (should return promptly now).
+    stderr_handle.join().expect("stderr thread panicked");
+
+    let lines = std::sync::Arc::into_inner(all_lines)
+        .expect("Arc refcount is 1")
+        .into_inner()
+        .expect("mutex not poisoned");
+
+    Ok((status, lines))
+}
+
+/// Extract memory/flash usage summary lines from captured build output.
+fn extract_memory_summary(lines: &[String]) -> Option<String> {
+    let mut result: Vec<&str> = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = &lines[i];
+
+        // arm-none-eabi-size format:
+        //   text    data     bss     dec     hex filename
+        //   12344     56    7890   20290   4f42 firmware.elf
+        if line.contains("text")
+            && line.contains("data")
+            && line.contains("bss")
+            && line.contains("dec")
+            && line.contains("hex")
+        {
+            result.push(line.as_str());
+            // Grab the data line immediately below, if it exists.
+            if i + 1 < lines.len() && !lines[i + 1].trim().is_empty() {
+                result.push(lines[i + 1].as_str());
+            }
+            i += 2;
+            continue;
+        }
+
+        // Custom memory region table (STM32CubeMX style).
+        if line.starts_with("Memory region") && line.contains("Used Size") {
+            result.push(line.as_str());
+            // Collect all following lines that look like data rows.
+            for j in (i + 1)..lines.len() {
+                let row = &lines[j];
+                let trimmed = row.trim_start();
+                if trimmed.starts_with("FLASH:")
+                    || trimmed.starts_with("RAM:")
+                    || trimmed.starts_with("SRAM:")
+                    || trimmed.starts_with("CCMRAM:")
+                    || trimmed.starts_with("BKPSRAM:")
+                {
+                    result.push(row.as_str());
+                } else if row.trim().is_empty() {
+                    break;
+                } else {
+                    // Stop at first non-data, non-empty line.
+                    break;
+                }
+            }
+            break;
+        }
+
+        i += 1;
+    }
+
+    if result.is_empty() {
+        None
+    } else {
+        Some(result.join("\n"))
+    }
 }
 
 // ── internal helpers ───────────────────────────────────────────────────────
@@ -1613,4 +1836,105 @@ fn load_or_default_config(root: &Path, output_dir: &Path) -> ProjectConfig {
             exclude_dirs: vec!["build".into(), ".git".into(), "third_party".into()],
             ..Default::default()
         })
+}
+
+// ── tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod cmake_format_tests {
+    use super::*;
+
+    /// Wrapper that forces `colored` to emit ANSI codes even when stdout is
+    /// not a terminal (e.g. inside `cargo test`).
+    ///
+    /// Uses a mutex to prevent race conditions on `colored`'s global state
+    /// when tests run in parallel.
+    fn format_colored(line: &str) -> String {
+        static MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = MUTEX.lock().expect("format_colored lock");
+        colored::control::set_override(true);
+        let result = format_cmake_line(line);
+        colored::control::set_override(false);
+        result
+    }
+
+    // ── Colored output: result differs from input ────────────────────
+
+    #[test]
+    fn error_lines_are_colored() {
+        let line = "error: 'foo' was not declared";
+        let result = format_colored(line);
+        assert_ne!(result, line, "error lines should be colored");
+        assert!(result.contains("error:"), "should still contain original text");
+    }
+
+    #[test]
+    fn warning_lines_are_colored() {
+        let line = "warning: unused variable 'x'";
+        let result = format_colored(line);
+        assert_ne!(result, line, "warnings should be colored");
+    }
+
+    #[test]
+    fn progress_lines_are_colored() {
+        let line = "[42/128] Building C object foo.c.obj";
+        let result = format_colored(line);
+        assert_ne!(result, line, "progress lines should be colored");
+    }
+
+    #[test]
+    fn memory_header_is_colored() {
+        let line = "   text    data     bss     dec     hex filename";
+        let result = format_colored(line);
+        assert_ne!(result, line, "memory headers should be colored");
+    }
+
+    #[test]
+    fn memory_data_line_is_colored() {
+        let line = "  12344     56    7890   20290   4f42 firmware.elf";
+        let result = format_colored(line);
+        assert_ne!(result, line, "memory data should be colored");
+    }
+
+    #[test]
+    fn linking_line_is_colored() {
+        let line = "Linking C executable firmware.elf";
+        let result = format_colored(line);
+        assert_ne!(result, line, "linking lines should be colored");
+    }
+
+    #[test]
+    fn built_target_is_colored() {
+        let line = "Built target firmware";
+        let result = format_colored(line);
+        assert_ne!(result, line, "built target should be colored");
+    }
+
+    #[test]
+    fn ninja_failed_is_colored() {
+        let line = "ninja: build stopped: subcommand failed.";
+        let result = format_colored(line);
+        assert_ne!(result, line, "ninja failed should be colored");
+    }
+
+    #[test]
+    fn failed_line_is_colored() {
+        let line = "FAILED: [code=1] output.elf";
+        let result = format_colored(line);
+        assert_ne!(result, line, "FAILED lines should be colored");
+    }
+
+    // ── Passthrough: result equals input ────────────────────────────
+
+    #[test]
+    fn normal_line_passes_through() {
+        let line = "/usr/bin/gcc -c source.c -o source.o";
+        let result = format_colored(line);
+        assert_eq!(result, line);
+    }
+
+    #[test]
+    fn empty_line_unchanged() {
+        assert_eq!(format_colored(""), "");
+    }
 }

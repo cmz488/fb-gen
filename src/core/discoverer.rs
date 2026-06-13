@@ -178,8 +178,8 @@ impl ModuleDiscoverer {
         // Root-level compilable files (e.g. startup_*.s for embedded projects)
         // would otherwise be silently dropped because the generator skips
         // `is_root` modules.  Root modules that only hold linker scripts or
-        // headers are left alone — linker scripts are handled by
-        // `detect_linker_scripts()` in the generator.
+        // headers are left alone — linker scripts are collected from all
+        // modules and emitted in the root CMakeLists.txt by render_root().
         if let Some(root_idx) = modules.iter().position(|m| m.is_root) {
             let has_compilable = !modules[root_idx].sources.is_empty()
                 || !modules[root_idx].asm_sources.is_empty();

@@ -616,10 +616,11 @@ fn test_cross_compile_template() {
         "root CMakeLists.txt should NOT contain CMAKE_SYSTEM_NAME (moved to toolchain.cmake)"
     );
 
-    // ── Auto-detected linker script ─────────────────────────────────
+    // ── Linker script in root CMakeLists.txt (not toolchain) ──────
     assert!(
-        toolchain_content.contains("-T ${CMAKE_SOURCE_DIR}/STM32F103XX_FLASH.ld"),
-        "toolchain.cmake should auto-detect STM32F103XX_FLASH.ld at root"
+        root_content.contains("add_link_options(-T \"${CMAKE_SOURCE_DIR}/STM32F103XX_FLASH.ld\")"),
+        "root CMakeLists.txt should declare linker script via add_link_options, got:\n{}",
+        root_content
     );
 }
 
@@ -1155,12 +1156,12 @@ fn test_linker_script_auto_detect_single() {
     let empty_graph = DependencyGraph::new();
     generator.generate(&modules, &empty_graph, true, &[]).unwrap();
 
-    let toolchain_path = root.join("cmake").join("toolchain.cmake");
-    let content = std::fs::read_to_string(&toolchain_path).unwrap();
+    let root_cmake = root.join("CMakeLists.txt");
+    let content = std::fs::read_to_string(&root_cmake).unwrap();
 
     assert!(
-        content.contains("-T ${CMAKE_SOURCE_DIR}/flash.ld"),
-        "toolchain.cmake should auto-detect flash.ld at root, got:\n{}",
+        content.contains("add_link_options(-T \"${CMAKE_SOURCE_DIR}/flash.ld\")"),
+        "root CMakeLists.txt should declare flash.ld via add_link_options, got:\n{}",
         content
     );
 }
@@ -1209,12 +1210,19 @@ fn test_linker_script_auto_detect_multiple() {
     let empty_graph = DependencyGraph::new();
     generator.generate(&modules, &empty_graph, true, &[]).unwrap();
 
-    let toolchain_path = root.join("cmake").join("toolchain.cmake");
-    let content = std::fs::read_to_string(&toolchain_path).unwrap();
+    // All linker scripts are collected in root CMakeLists.txt, not in the toolchain.
+    let root_cmake = root.join("CMakeLists.txt");
+    let root_content = std::fs::read_to_string(&root_cmake).unwrap();
 
     assert!(
-        !content.contains("-T \"${CMAKE_SOURCE_DIR}"),
-        "toolchain.cmake should NOT auto-detect linker script when multiple .ld files at root"
+        root_content.contains("add_link_options(-T \"${CMAKE_SOURCE_DIR}/flash_256k.ld\")"),
+        "root CMakeLists.txt should declare flash_256k.ld, got:\n{}",
+        root_content
+    );
+    assert!(
+        root_content.contains("add_link_options(-T \"${CMAKE_SOURCE_DIR}/flash_512k.ld\")"),
+        "root CMakeLists.txt should declare flash_512k.ld, got:\n{}",
+        root_content
     );
 }
 
