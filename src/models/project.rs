@@ -175,6 +175,11 @@ pub struct ProjectMeta {
     pub dependency_graph: DependencySnapshot,
     pub file_checksums: HashMap<String, String>,
     pub last_sync: String,
+    /// Hash of .fb-gen/cache/installed_packages.json.
+    /// Used to detect install/uninstall changes between syncs.
+    /// Empty when no packages have ever been installed for this project.
+    #[serde(default)]
+    pub installed_packages_hash: String,
 }
 
 /// Parsed content of CMakePresets.json.
