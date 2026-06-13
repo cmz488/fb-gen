@@ -75,6 +75,10 @@ pub fn detect_toolchains() -> Vec<DetectedToolchain> {
             if stem.is_empty() {
                 continue;
             }
+            // On Windows, the compiler binary has a .exe extension; sibling
+            // binaries (g++, objcopy) need the same suffix for the existence
+            // check to succeed.
+            let is_exe = file_name.ends_with(".exe");
 
             // Check against known patterns.
             let matched = KNOWN_TOOLCHAINS
@@ -90,9 +94,15 @@ pub fn detect_toolchains() -> Vec<DetectedToolchain> {
                 continue; // Already recorded this prefix.
             }
 
-            // Verify sibling tools exist.
-            let gxx_path = dir.join(format!("{prefix}g++"));
-            let objcopy_path = dir.join(format!("{prefix}objcopy"));
+            // Verify sibling tools exist.  On Windows, append .exe to match
+            // the gcc binary's naming convention.
+            let (gxx_name, objcopy_name) = if is_exe {
+                (format!("{prefix}g++.exe"), format!("{prefix}objcopy.exe"))
+            } else {
+                (format!("{prefix}g++"), format!("{prefix}objcopy"))
+            };
+            let gxx_path = dir.join(&gxx_name);
+            let objcopy_path = dir.join(&objcopy_name);
             if !gxx_path.exists() || !objcopy_path.exists() {
                 continue; // Incomplete toolchain.
             }

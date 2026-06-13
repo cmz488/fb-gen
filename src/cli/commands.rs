@@ -171,6 +171,72 @@ fn scan_and_discover(
     Ok((modules, graph, user_modules))
 }
 
+/// Check that required external tools (cmake, compiler) are available on PATH.
+/// Reports warnings for missing tools; never blocks the user.
+fn check_required_tools(config: &ProjectConfig, reporter: &Reporter) {
+    // ── cmake ─────────────────────────────────────────────────────────
+    match find_on_path("cmake") {
+        Some(path) => reporter.report_info(&format!("cmake found: {}", path.display())),
+        None => reporter.report_warning(
+            "cmake not found on PATH.  Install cmake or add it to PATH before running `fb-gen run`."
+        ),
+    }
+
+    // ── Compiler ──────────────────────────────────────────────────────
+    use crate::models::project::{Compiler, TargetArch};
+    let compiler_name = match &config.target_arch {
+        TargetArch::NoneEabi | TargetArch::ARM32 | TargetArch::ARM64 | TargetArch::RISCV64 => {
+            // Cross-compilation: check the toolchain prefix if configured.
+            match &config.toolchain {
+                Some(tc) if !tc.prefix.is_empty() => {
+                    format!("{}gcc", tc.prefix)
+                }
+                _ => {
+                    reporter.report_warning(
+                        "Cross-compilation target selected but no toolchain prefix configured. \
+                         Run `fb-gen init` again to configure the toolchain."
+                    );
+                    return;
+                }
+            }
+        }
+        _ => match &config.compiler {
+            Compiler::GCC => "gcc".to_string(),
+            Compiler::Clang => "clang".to_string(),
+            Compiler::MSVC => "cl".to_string(),
+            Compiler::Custom(ref name) => name.clone(),
+        },
+    };
+
+    match find_on_path(&compiler_name) {
+        Some(path) => reporter.report_info(&format!("compiler found: {} ({})", compiler_name, path.display())),
+        None => reporter.report_warning(&format!(
+            "Compiler '{}' not found on PATH.  Install it or add it to PATH before building.",
+            compiler_name
+        )),
+    }
+}
+
+/// Search for an executable on `$PATH`.  On Windows also checks `.exe` suffix.
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        // On Windows, try appending .exe.
+        #[cfg(windows)]
+        {
+            let exe_candidate = dir.join(format!("{name}.exe"));
+            if exe_candidate.exists() {
+                return Some(exe_candidate);
+            }
+        }
+    }
+    None
+}
+
 // ── commands ───────────────────────────────────────────────────────────────
 
 /// `fb-gen init` — interactive first-time project setup.
@@ -202,6 +268,9 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>) -> FbGenResult<()> {
         reporter.report_warning("Aborted by user.");
         return Ok(());
     }
+
+    // ── Environment checks ────────────────────────────────────────────
+    check_required_tools(&config, &reporter);
 
     // ── Pipeline ──
     let start = Instant::now();
