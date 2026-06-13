@@ -1094,11 +1094,26 @@ pub fn cmd_validate(cli: &Cli) -> FbGenResult<()> {
     for f in &toolchain_args {
         cmd.arg(f);
     }
+    if cli.lsp {
+        cmd.arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
+    }
     let output = cmd
         .output()
         .map_err(|e| FbGenError::Config(format!("failed to run cmake: {e}")))?;
 
     if output.status.success() {
+        // ── LSP symlink ──────────────────────────────────────────────
+        if cli.lsp {
+            let cc_json = build_dir.join("compile_commands.json");
+            if cc_json.exists() {
+                match symlink_or_copy(&cc_json, &root.join("compile_commands.json")) {
+                    Ok(()) => reporter.report_success("compile_commands.json → project root"),
+                    Err(e) => reporter.report_warning(&format!(
+                        "compile_commands.json symlink failed: {e}"
+                    )),
+                }
+            }
+        }
         reporter.report_success("CMake configuration is valid.");
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
