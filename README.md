@@ -86,7 +86,7 @@ fb-gen run --watch            # 启用文件监控，自动增量更新
 | `-w, --watch` | 启用文件监控，自动增量更新 | — |
 | `-v, --verbose` | 详细输出（`-vv` / `-vvv` 更详细） | — |
 | `-q, --quiet` | 静默模式，仅输出错误 | — |
-| `--lsp` |生成complie_command.json文件共lsp分析| - |
+| `--lsp` |生成complie_command.json文件供lsp分析| - |
 
 ## 架构
 

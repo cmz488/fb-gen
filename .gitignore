@@ -1,6 +1,6 @@
 /target
-docs
-test
+/docs
+/test
 CLAUDE.md
 design.md
 
