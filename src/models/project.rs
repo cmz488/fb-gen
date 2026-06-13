@@ -178,13 +178,13 @@ pub struct ConfigurePreset {
     pub toolchain_file: Option<String>,
     pub binary_dir: Option<String>,
     /// Name of another configure preset to inherit from.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherits: Option<String>,
     /// Whether this preset should be hidden in GUI tools.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
     /// Cache variable overrides applied when this preset is selected.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_variables: Option<HashMap<String, serde_json::Value>>,
 }
 

@@ -696,7 +696,7 @@ fn do_incremental_sync(
     let user_modules = scanner.scan_user_cmake_files(root, &config.exclude_dirs);
     let user_modules = filter_overlapping_user_modules(user_modules, &modules, root, reporter);
     let generator = CMakeGenerator::new(config)?;
-    generator.generate(&modules, &graph, false, &user_modules)?;
+    generator.generate(&modules, &graph, true, &user_modules)?;
     reporter.report_success(&format!("{} module(s) updated", n_affected));
 
     // ── 5. Refresh presets & toolchain file list ──
@@ -744,6 +744,31 @@ fn ensure_device_defines_preset(
         return Ok(());
     }
 
+    // If a user-owned toolchain file already exists at the target path,
+    // warn before overwriting it.
+    let toolchain_path = root.join("cmake").join("toolchain.cmake");
+    if toolchain_path.exists() && generator.user_has_toolchain_file() {
+        reporter.report_warning(
+            "Device defines configured — fb-gen will replace your existing \
+             cmake/toolchain.cmake. Consider backing it up first.",
+        );
+    }
+
+    // Force-generate the toolchain file.  For non-embedded targets
+    // (X86_64, X86, WASM, Custom) render_toolchain returns None and
+    // force_generate_toolchain is a no-op.
+    generator.force_generate_toolchain()?;
+
+    if !toolchain_path.exists() {
+        // The target architecture doesn't use a toolchain file.
+        reporter.report_warning(
+            "Device defines are configured but the target architecture \
+             does not use a generated toolchain file. \
+             Add the defines to your build flags manually.",
+        );
+    }
+
+    // Switch configure presets to point at fb-gen's toolchain file.
     if let Some(ref mut presets) = config.cmake_presets {
         let mut switched = false;
         for cp in &mut presets.configure_presets {
@@ -753,7 +778,6 @@ fn ensure_device_defines_preset(
             }
         }
         if switched {
-            generator.force_generate_toolchain()?;
             reporter.report_info(
                 "Toolchain preset switched to fb-gen toolchain.cmake (device defines configured)",
             );
@@ -770,6 +794,16 @@ fn ensure_device_defines_preset(
                 }
             }
         }
+    } else if toolchain_path.exists() {
+        // No CMakePresets.json but the toolchain file was generated.
+        // The device defines will still take effect because cmake
+        // picks up CMAKE_TOOLCHAIN_FILE from CMakeLists.txt or the
+        // command line.
+        reporter.report_info(
+            "Device defines written to cmake/toolchain.cmake. \
+             Pass -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain.cmake to cmake \
+             if not already configured.",
+        );
     }
 
     Ok(())
@@ -1236,7 +1270,7 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
         let generator = CMakeGenerator::new(&config)?;
         let empty_graph = DependencyGraph::new();
         let ref_graph = graph.as_ref().unwrap_or(&empty_graph);
-        generator.generate(&modules, ref_graph, false, &user_modules)?;
+        generator.generate(&modules, ref_graph, true, &user_modules)?;
         // Save cache for future incremental syncs.
         save_meta_cache(&root, &modules, graph.as_ref(), &config)?;
     } else if cache.exists() {

@@ -192,7 +192,7 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 # MCU specific flags
 set(TARGET_FLAGS "{{ target_flags }} ")
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${TARGET_FLAGS}")
+set(CMAKE_C_FLAGS "${TARGET_FLAGS}")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -fdata-sections -ffunction-sections -fstack-usage")
 set(CMAKE_ASM_FLAGS "${CMAKE_C_FLAGS} -x assembler-with-cpp -MMD -MP")
 
@@ -317,10 +317,7 @@ impl CMakeGenerator {
         let root_ld_scripts = detect_linker_scripts(&self.config.root);
         if let Some(content) = self.render_toolchain(&root_ld_scripts)? {
             let path = self.config.root.join("cmake").join("toolchain.cmake");
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).map_err(FbGenError::Io)?;
-            }
-            fs::write(&path, &content).map_err(FbGenError::Io)?;
+            self.write_if_changed(&path, &content, "toolchain.cmake", true)?;
         }
         Ok(())
     }
@@ -692,7 +689,7 @@ impl CMakeGenerator {
     /// Returns `true` when an existing, non-fb-gen toolchain file is found —
     /// in that case fb-gen will **not** generate its own so the user's file
     /// is never overwritten.
-    fn user_has_toolchain_file(&self) -> bool {
+    pub(crate) fn user_has_toolchain_file(&self) -> bool {
         // Collect candidate paths to check.
         let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -796,14 +793,15 @@ impl CMakeGenerator {
             flags.push(tc.extra_flags.clone());
         }
         for define in &tc.device_defines {
-            if !define.is_empty() {
-                flags.push(format!("-D{}", define));
+            let cleaned = define.strip_prefix("-D").unwrap_or(define);
+            if !cleaned.is_empty() {
+                flags.push(format!("-D{}", cleaned));
             }
         }
         let target_flags = flags.join(" ");
 
         let ld_flag = if root_ld_scripts.len() == 1 {
-            format!(" -T \"${{CMAKE_SOURCE_DIR}}/{}\"", root_ld_scripts[0])
+            format!(" -T ${{CMAKE_SOURCE_DIR}}/{}", root_ld_scripts[0])
         } else {
             String::new()
         };

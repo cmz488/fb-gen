@@ -618,7 +618,7 @@ fn test_cross_compile_template() {
 
     // ── Auto-detected linker script ─────────────────────────────────
     assert!(
-        toolchain_content.contains("-T \"${CMAKE_SOURCE_DIR}/STM32F103XX_FLASH.ld\""),
+        toolchain_content.contains("-T ${CMAKE_SOURCE_DIR}/STM32F103XX_FLASH.ld"),
         "toolchain.cmake should auto-detect STM32F103XX_FLASH.ld at root"
     );
 }
@@ -1159,7 +1159,7 @@ fn test_linker_script_auto_detect_single() {
     let content = std::fs::read_to_string(&toolchain_path).unwrap();
 
     assert!(
-        content.contains("-T \"${CMAKE_SOURCE_DIR}/flash.ld\""),
+        content.contains("-T ${CMAKE_SOURCE_DIR}/flash.ld"),
         "toolchain.cmake should auto-detect flash.ld at root, got:\n{}",
         content
     );
