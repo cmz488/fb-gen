@@ -143,17 +143,17 @@ pub const XTENSA_ESP32_ELF: Package = Package {
     downloads: PlatformDownloads {
         linux_x86_64: Some(Download {
             url: "https://github.com/espressif/crosstool-NG/releases/download/\
-                  esp-14.2.0_20240906/xtensa-esp-elf-gcc14_2_0-esp-14.2.0_20240906-x86_64-linux-gnu.tar.xz",
+                  esp-14.2.0_20240906/xtensa-esp-elf-14.2.0_20240906-x86_64-linux-gnu.tar.xz",
             sha256: "TODO_REAL_SHA256",
         }),
         linux_aarch64: Some(Download {
             url: "https://github.com/espressif/crosstool-NG/releases/download/\
-                  esp-14.2.0_20240906/xtensa-esp-elf-gcc14_2_0-esp-14.2.0_20240906-aarch64-linux-gnu.tar.xz",
+                  esp-14.2.0_20240906/xtensa-esp-elf-14.2.0_20240906-aarch64-linux-gnu.tar.xz",
             sha256: "TODO_REAL_SHA256",
         }),
         macos_arm64: Some(Download {
             url: "https://github.com/espressif/crosstool-NG/releases/download/\
-                  esp-14.2.0_20240906/xtensa-esp-elf-gcc14_2_0-esp-14.2.0_20240906-aarch64-apple-darwin.tar.xz",
+                  esp-14.2.0_20240906/xtensa-esp-elf-14.2.0_20240906-aarch64-apple-darwin.tar.gz",
             sha256: "TODO_REAL_SHA256",
         }),
         macos_x86_64: None,
@@ -177,17 +177,17 @@ pub const RISCV32_ESP_ELF: Package = Package {
     downloads: PlatformDownloads {
         linux_x86_64: Some(Download {
             url: "https://github.com/espressif/crosstool-NG/releases/download/\
-                  esp-14.2.0_20240906/riscv32-esp-elf-gcc14_2_0-esp-14.2.0_20240906-x86_64-linux-gnu.tar.xz",
+                  esp-14.2.0_20240906/riscv32-esp-elf-14.2.0_20240906-x86_64-linux-gnu.tar.xz",
             sha256: "TODO_REAL_SHA256",
         }),
         linux_aarch64: Some(Download {
             url: "https://github.com/espressif/crosstool-NG/releases/download/\
-                  esp-14.2.0_20240906/riscv32-esp-elf-gcc14_2_0-esp-14.2.0_20240906-aarch64-linux-gnu.tar.xz",
+                  esp-14.2.0_20240906/riscv32-esp-elf-14.2.0_20240906-aarch64-linux-gnu.tar.xz",
             sha256: "TODO_REAL_SHA256",
         }),
         macos_arm64: Some(Download {
             url: "https://github.com/espressif/crosstool-NG/releases/download/\
-                  esp-14.2.0_20240906/riscv32-esp-elf-gcc14_2_0-esp-14.2.0_20240906-aarch64-apple-darwin.tar.xz",
+                  esp-14.2.0_20240906/riscv32-esp-elf-14.2.0_20240906-aarch64-apple-darwin.tar.gz",
             sha256: "TODO_REAL_SHA256",
         }),
         macos_x86_64: None,
@@ -315,11 +315,11 @@ pub const STM32F1_HAL: Package = Package {
     id: "stm32f1-hal",
     name: "STM32CubeF1 HAL",
     kind: PackageKind::McuSdk,
-    version: "1.8.5",
+    version: "1.8.7",
     arch: Some(TargetArch::NoneEabi),
     downloads: PlatformDownloads {
         linux_x86_64: Some(Download {
-            url: "https://github.com/STMicroelectronics/STM32CubeF1/archive/refs/tags/v1.8.5.tar.gz",
+            url: "https://github.com/STMicroelectronics/STM32CubeF1/archive/refs/tags/v1.8.7.tar.gz",
             sha256: "TODO_REAL_SHA256",
         }),
         linux_aarch64: None,
@@ -350,11 +350,11 @@ pub const STM32F4_HAL: Package = Package {
     id: "stm32f4-hal",
     name: "STM32CubeF4 HAL",
     kind: PackageKind::McuSdk,
-    version: "1.28.0",
+    version: "1.28.3",
     arch: Some(TargetArch::NoneEabi),
     downloads: PlatformDownloads {
         linux_x86_64: Some(Download {
-            url: "https://github.com/STMicroelectronics/STM32CubeF4/archive/refs/tags/v1.28.0.tar.gz",
+            url: "https://github.com/STMicroelectronics/STM32CubeF4/archive/refs/tags/v1.28.3.tar.gz",
             sha256: "TODO_REAL_SHA256",
         }),
         linux_aarch64: None,
@@ -385,11 +385,11 @@ pub const STM32H7_HAL: Package = Package {
     id: "stm32h7-hal",
     name: "STM32CubeH7 HAL",
     kind: PackageKind::McuSdk,
-    version: "1.11.2",
+    version: "1.13.0",
     arch: Some(TargetArch::NoneEabi),
     downloads: PlatformDownloads {
         linux_x86_64: Some(Download {
-            url: "https://github.com/STMicroelectronics/STM32CubeH7/archive/refs/tags/v1.11.2.tar.gz",
+            url: "https://github.com/STMicroelectronics/STM32CubeH7/archive/refs/tags/v1.13.0.tar.gz",
             sha256: "TODO_REAL_SHA256",
         }),
         linux_aarch64: None,
@@ -492,11 +492,11 @@ pub const STM32G4_HAL: Package = Package {
     id: "stm32g4-hal",
     name: "STM32CubeG4 HAL",
     kind: PackageKind::McuSdk,
-    version: "1.5.2",
+    version: "1.6.3",
     arch: Some(TargetArch::NoneEabi),
     downloads: PlatformDownloads {
         linux_x86_64: Some(Download {
-            url: "https://github.com/STMicroelectronics/STM32CubeG4/archive/refs/tags/v1.5.2.tar.gz",
+            url: "https://github.com/STMicroelectronics/STM32CubeG4/archive/refs/tags/v1.6.3.tar.gz",
             sha256: "TODO_REAL_SHA256",
         }),
         linux_aarch64: None,
@@ -526,11 +526,11 @@ pub const STM32L4_HAL: Package = Package {
     id: "stm32l4-hal",
     name: "STM32CubeL4 HAL",
     kind: PackageKind::McuSdk,
-    version: "1.17.3",
+    version: "1.18.2",
     arch: Some(TargetArch::NoneEabi),
     downloads: PlatformDownloads {
         linux_x86_64: Some(Download {
-            url: "https://github.com/STMicroelectronics/STM32CubeL4/archive/refs/tags/v1.17.3.tar.gz",
+            url: "https://github.com/STMicroelectronics/STM32CubeL4/archive/refs/tags/v1.18.2.tar.gz",
             sha256: "TODO_REAL_SHA256",
         }),
         linux_aarch64: None,
@@ -564,7 +564,7 @@ pub const NRF52_SDK: Package = Package {
     arch: Some(TargetArch::NoneEabi),
     downloads: PlatformDownloads {
         linux_x86_64: Some(Download {
-            url: "https://github.com/NordicPlayground/nrf5-sdk/archive/refs/tags/v17.1.0.tar.gz",
+            url: "https://github.com/NordicPlayground/nrf5-sdk/archive/refs/heads/master.tar.gz",
             sha256: "TODO_REAL_SHA256",
         }),
         linux_aarch64: None,
@@ -632,7 +632,7 @@ pub const GD32F3_HAL: Package = Package {
     arch: Some(TargetArch::NoneEabi),
     downloads: PlatformDownloads {
         linux_x86_64: Some(Download {
-            url: "https://github.com/honghaier250/GD32F303_Firmware_Library/archive/refs/tags/v2.2.1.tar.gz",
+            url: "https://github.com/honghaier250/GD32F303_Firmware_Library/archive/refs/heads/master.tar.gz",
             sha256: "TODO_REAL_SHA256",
         }),
         linux_aarch64: None,
@@ -699,7 +699,7 @@ pub const LWIP: Package = Package {
     arch: None,
     downloads: PlatformDownloads {
         linux_x86_64: Some(Download {
-            url: "https://github.com/lwip-tcpip/lwip/archive/refs/tags/STABLE-2_2_0_RELEASE.tar.gz",
+            url: "https://github.com/lwip-tcpip/lwip/archive/refs/heads/master.tar.gz",
             sha256: "TODO_REAL_SHA256",
         }),
         linux_aarch64: None,
@@ -732,7 +732,7 @@ pub const FATFS: Package = Package {
     arch: None,
     downloads: PlatformDownloads {
         linux_x86_64: Some(Download {
-            url: "https://github.com/abbrev/fatfs/archive/refs/tags/v0.15.tar.gz",
+url: "https://elm-chan.org/fsw/ff/arc/ff15.zip",
             sha256: "TODO_REAL_SHA256",
         }),
         linux_aarch64: None,
@@ -896,11 +896,11 @@ pub const NANOPB: Package = Package {
     id: "nanopb",
     name: "NanoPB (Protocol Buffers)",
     kind: PackageKind::Middleware,
-    version: "0.4.9",
+    version: "0.4.9.1",
     arch: None,
     downloads: PlatformDownloads {
         linux_x86_64: Some(Download {
-            url: "https://github.com/nanopb/nanopb/archive/refs/tags/0.4.9.tar.gz",
+            url: "https://github.com/nanopb/nanopb/archive/refs/tags/nanopb-0.4.9.1.tar.gz",
             sha256: "TODO_REAL_SHA256",
         }),
         linux_aarch64: None,
@@ -924,11 +924,11 @@ pub const CMSIS_DSP: Package = Package {
     id: "cmsis-dsp",
     name: "CMSIS-DSP (ARM DSP Library)",
     kind: PackageKind::Middleware,
-    version: "1.15.1",
+    version: "1.17.0",
     arch: Some(TargetArch::NoneEabi),
     downloads: PlatformDownloads {
         linux_x86_64: Some(Download {
-            url: "https://github.com/ARM-software/CMSIS-DSP/archive/refs/tags/v1.15.1.tar.gz",
+            url: "https://github.com/ARM-software/CMSIS-DSP/archive/refs/tags/v1.17.0.tar.gz",
             sha256: "TODO_REAL_SHA256",
         }),
         linux_aarch64: None,
