@@ -14,6 +14,16 @@ pub enum PackageKind {
     Middleware,
 }
 
+impl PackageKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PackageKind::Toolchain => "toolchain",
+            PackageKind::McuSdk => "sdk",
+            PackageKind::Middleware => "middleware",
+        }
+    }
+}
+
 /// Installation scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallScope {
@@ -273,6 +283,31 @@ pub const AARCH64_LINUX_GNU: Package = Package {
     cmake_metadata: None,
 };
 
+// ── MSP430 group ─────────────────────────────────────────────
+
+/// MSP430 GNU Toolchain (ultra-low-power 16-bit MCU).
+pub const MSP430_ELF_GCC: Package = Package {
+    id: "msp430-elf-gcc",
+    name: "MSP430 GNU Toolchain",
+    kind: PackageKind::Toolchain,
+    version: "9.3.1.11",
+    arch: None,
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://software-dl.ti.com/msp430/msp430_public_sw/mcu/msp430/MSPGCC/latest/exports/msp430-gcc-full-linux-x64-installer-9.3.1.11.tar.xz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "msp430-elf",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: None,
+};
+
 // ── MCU SDKs ─────────────────────────────────────────────────
 
 /// STM32CubeF1 HAL — STM32F1xx Hardware Abstraction Layer.
@@ -306,6 +341,318 @@ pub const STM32F1_HAL: Package = Package {
             "Drivers/STM32F1xx_HAL_Driver/Src/*.c",
         ],
         compile_defines: &["USE_HAL_DRIVER", "STM32F103xB"],
+        link_libraries: &[],
+    }),
+};
+
+/// STM32CubeF4 HAL — STM32F4xx Hardware Abstraction Layer.
+pub const STM32F4_HAL: Package = Package {
+    id: "stm32f4-hal",
+    name: "STM32CubeF4 HAL",
+    kind: PackageKind::McuSdk,
+    version: "1.28.0",
+    arch: Some(TargetArch::NoneEabi),
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/STMicroelectronics/STM32CubeF4/archive/refs/tags/v1.28.0.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &[
+            "Drivers/STM32F4xx_HAL_Driver/Inc",
+            "Drivers/STM32F4xx_HAL_Driver/Inc/Legacy",
+            "Drivers/CMSIS/Device/ST/STM32F4xx/Include",
+            "Drivers/CMSIS/Include",
+        ],
+        source_globs: &[
+            "Drivers/STM32F4xx_HAL_Driver/Src/*.c",
+        ],
+        compile_defines: &["USE_HAL_DRIVER", "STM32F407xx"],
+        link_libraries: &[],
+    }),
+};
+
+/// STM32CubeH7 HAL — STM32H7xx Hardware Abstraction Layer.
+pub const STM32H7_HAL: Package = Package {
+    id: "stm32h7-hal",
+    name: "STM32CubeH7 HAL",
+    kind: PackageKind::McuSdk,
+    version: "1.11.2",
+    arch: Some(TargetArch::NoneEabi),
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/STMicroelectronics/STM32CubeH7/archive/refs/tags/v1.11.2.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &[
+            "Drivers/STM32H7xx_HAL_Driver/Inc",
+            "Drivers/STM32H7xx_HAL_Driver/Inc/Legacy",
+            "Drivers/CMSIS/Device/ST/STM32H7xx/Include",
+            "Drivers/CMSIS/Include",
+        ],
+        source_globs: &[
+            "Drivers/STM32H7xx_HAL_Driver/Src/*.c",
+        ],
+        compile_defines: &["USE_HAL_DRIVER", "STM32H743xx"],
+        link_libraries: &[],
+    }),
+};
+
+/// Arduino-ESP32 core — Arduino API layer for all ESP32 series.
+///
+/// Covers Xtensa (ESP32/S2/S3) and RISC-V (ESP32-C3/C6/H2/P4).
+/// Requires the corresponding toolchain installed first:
+/// `xtensa-esp32-elf-gcc` or `riscv32-esp-elf-gcc`.
+pub const ESP32_ARDUINO: Package = Package {
+    id: "esp32-arduino",
+    name: "ESP32 Arduino Core (all variants)",
+    kind: PackageKind::McuSdk,
+    version: "3.1.2",
+    arch: None,  // cross-architecture: Xtensa + RISC-V
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/espressif/arduino-esp32/archive/refs/tags/3.1.2.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &[
+            "cores/esp32",
+            "variants/esp32",
+        ],
+        source_globs: &[
+            "cores/esp32/*.c",
+            "cores/esp32/*.cpp",
+        ],
+        compile_defines: &["ARDUINO=10819"],
+        link_libraries: &[],
+    }),
+};
+
+/// STM32CubeG0 HAL — STM32G0xx (Cortex-M0+ entry-level).
+pub const STM32G0_HAL: Package = Package {
+    id: "stm32g0-hal",
+    name: "STM32CubeG0 HAL",
+    kind: PackageKind::McuSdk,
+    version: "1.6.2",
+    arch: Some(TargetArch::NoneEabi),
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/STMicroelectronics/STM32CubeG0/archive/refs/tags/v1.6.2.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &[
+            "Drivers/STM32G0xx_HAL_Driver/Inc",
+            "Drivers/CMSIS/Device/ST/STM32G0xx/Include",
+            "Drivers/CMSIS/Include",
+        ],
+        source_globs: &[
+            "Drivers/STM32G0xx_HAL_Driver/Src/*.c",
+        ],
+        compile_defines: &["USE_HAL_DRIVER", "STM32G031xx"],
+        link_libraries: &[],
+    }),
+};
+
+/// STM32CubeG4 HAL — STM32G4xx (Cortex-M4 + DSP, motor control).
+pub const STM32G4_HAL: Package = Package {
+    id: "stm32g4-hal",
+    name: "STM32CubeG4 HAL",
+    kind: PackageKind::McuSdk,
+    version: "1.5.2",
+    arch: Some(TargetArch::NoneEabi),
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/STMicroelectronics/STM32CubeG4/archive/refs/tags/v1.5.2.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &[
+            "Drivers/STM32G4xx_HAL_Driver/Inc",
+            "Drivers/CMSIS/Device/ST/STM32G4xx/Include",
+            "Drivers/CMSIS/Include",
+        ],
+        source_globs: &[
+            "Drivers/STM32G4xx_HAL_Driver/Src/*.c",
+        ],
+        compile_defines: &["USE_HAL_DRIVER", "STM32G474xx"],
+        link_libraries: &[],
+    }),
+};
+
+/// STM32CubeL4 HAL — STM32L4xx (Cortex-M4 ultra-low-power).
+pub const STM32L4_HAL: Package = Package {
+    id: "stm32l4-hal",
+    name: "STM32CubeL4 HAL",
+    kind: PackageKind::McuSdk,
+    version: "1.17.3",
+    arch: Some(TargetArch::NoneEabi),
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/STMicroelectronics/STM32CubeL4/archive/refs/tags/v1.17.3.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &[
+            "Drivers/STM32L4xx_HAL_Driver/Inc",
+            "Drivers/CMSIS/Device/ST/STM32L4xx/Include",
+            "Drivers/CMSIS/Include",
+        ],
+        source_globs: &[
+            "Drivers/STM32L4xx_HAL_Driver/Src/*.c",
+        ],
+        compile_defines: &["USE_HAL_DRIVER", "STM32L476xx"],
+        link_libraries: &[],
+    }),
+};
+
+/// nRF5 SDK — Nordic nRF52832/840 (Cortex-M4 + BLE).
+pub const NRF52_SDK: Package = Package {
+    id: "nrf52-sdk",
+    name: "nRF5 SDK (nRF52832/840)",
+    kind: PackageKind::McuSdk,
+    version: "17.1.0",
+    arch: Some(TargetArch::NoneEabi),
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/NordicPlayground/nrf5-sdk/archive/refs/tags/v17.1.0.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &[
+            "components",
+            "components/ble/common",
+            "components/libraries/util",
+        ],
+        source_globs: &[
+            "components/libraries/**/*.c",
+        ],
+        compile_defines: &["NRF52832_XXAA"],
+        link_libraries: &[],
+    }),
+};
+
+/// Raspberry Pi Pico SDK — RP2040 (dual Cortex-M0+).
+pub const RP2040_SDK: Package = Package {
+    id: "rp2040-sdk",
+    name: "Raspberry Pi Pico SDK",
+    kind: PackageKind::McuSdk,
+    version: "2.1.0",
+    arch: Some(TargetArch::ARM32),
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/raspberrypi/pico-sdk/archive/refs/tags/2.1.0.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &[
+            "src/common/pico_base/include",
+            "src/rp2_common/hardware_gpio/include",
+        ],
+        source_globs: &[
+            "src/rp2_common/hardware_*/**/*.c",
+            "src/common/pico_*/**/*.c",
+        ],
+        compile_defines: &["PICO_BOARD=pico"],
+        link_libraries: &[],
+    }),
+};
+
+/// GD32F3 HAL — GD32F303 (Chinese Cortex-M4, STM32F103 pin-compatible).
+pub const GD32F3_HAL: Package = Package {
+    id: "gd32f3-hal",
+    name: "GD32F3 HAL (GD32F303)",
+    kind: PackageKind::McuSdk,
+    version: "2.2.1",
+    arch: Some(TargetArch::NoneEabi),
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/honghaier250/GD32F303_Firmware_Library/archive/refs/tags/v2.2.1.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &[
+            "Firmware/CMSIS/GD/GD32F30x/Include",
+            "Firmware/GD32F30x_standard_peripheral/Include",
+            "Firmware/CMSIS/Include",
+        ],
+        source_globs: &[
+            "Firmware/GD32F30x_standard_peripheral/Source/*.c",
+        ],
+        compile_defines: &["GD32F303"],
         link_libraries: &[],
     }),
 };
@@ -432,6 +779,174 @@ pub const MBEDTLS: Package = Package {
     }),
 };
 
+/// LittleFS — fail-safe filesystem for SPI flash / SD cards.
+pub const LITTLEFS: Package = Package {
+    id: "littlefs",
+    name: "LittleFS (Flash Filesystem)",
+    kind: PackageKind::Middleware,
+    version: "2.9.1",
+    arch: None,
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/littlefs-project/littlefs/archive/refs/tags/v2.9.1.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &["."],
+        source_globs: &["*.c"],
+        compile_defines: &["LFS_NO_DEBUG"],
+        link_libraries: &[],
+    }),
+};
+
+/// LVGL — Light and Versatile Embedded Graphics Library (GUI for embedded displays).
+pub const LVGL: Package = Package {
+    id: "lvgl",
+    name: "LVGL (Embedded GUI)",
+    kind: PackageKind::Middleware,
+    version: "9.3.0",
+    arch: None,
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/lvgl/lvgl/archive/refs/tags/v9.3.0.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &["src"],
+        source_globs: &["src/**/*.c"],
+        compile_defines: &["LV_CONF_INCLUDE_SIMPLE"],
+        link_libraries: &[],
+    }),
+};
+
+/// TinyUSB — USB device/host stack (HID, CDC, MSC, MIDI).
+pub const TINYUSB: Package = Package {
+    id: "tinyusb",
+    name: "TinyUSB (USB Stack)",
+    kind: PackageKind::Middleware,
+    version: "0.17.0",
+    arch: None,
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/hathach/tinyusb/archive/refs/tags/0.17.0.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &["src"],
+        source_globs: &["src/*.c", "src/portable/st/stm32_fsdev/*.c"],
+        compile_defines: &[],
+        link_libraries: &[],
+    }),
+};
+
+/// cJSON — ultra-lightweight JSON parser for IoT.
+pub const CJSON: Package = Package {
+    id: "cjson",
+    name: "cJSON (JSON Parser)",
+    kind: PackageKind::Middleware,
+    version: "1.7.18",
+    arch: None,
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/DaveGamble/cJSON/archive/refs/tags/v1.7.18.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &["."],
+        source_globs: &["*.c"],
+        compile_defines: &["CJSON_HIDE_SYMBOLS"],
+        link_libraries: &[],
+    }),
+};
+
+/// NanoPB — Protocol Buffers for microcontrollers.
+pub const NANOPB: Package = Package {
+    id: "nanopb",
+    name: "NanoPB (Protocol Buffers)",
+    kind: PackageKind::Middleware,
+    version: "0.4.9",
+    arch: None,
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/nanopb/nanopb/archive/refs/tags/0.4.9.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &["."],
+        source_globs: &["*.c"],
+        compile_defines: &["PB_ENABLE_MALLOC"],
+        link_libraries: &[],
+    }),
+};
+
+/// CMSIS-DSP — ARM DSP library (FFT, filters, matrix ops).
+pub const CMSIS_DSP: Package = Package {
+    id: "cmsis-dsp",
+    name: "CMSIS-DSP (ARM DSP Library)",
+    kind: PackageKind::Middleware,
+    version: "1.15.1",
+    arch: Some(TargetArch::NoneEabi),
+    downloads: PlatformDownloads {
+        linux_x86_64: Some(Download {
+            url: "https://github.com/ARM-software/CMSIS-DSP/archive/refs/tags/v1.15.1.tar.gz",
+            sha256: "TODO_REAL_SHA256",
+        }),
+        linux_aarch64: None,
+        macos_arm64: None,
+        macos_x86_64: None,
+        windows_x86_64: None,
+    },
+    verify: "",
+    dependencies: &[],
+    scope: InstallScope::Global,
+    cmake_metadata: Some(CmakePackageMeta {
+        include_dirs: &["Include"],
+        source_globs: &["Source/**/*.c"],
+        compile_defines: &["ARM_MATH_CM4"],
+        link_libraries: &[],
+    }),
+};
+
 /// Full catalogue — all available toolchain packages.
 pub static CATALOGUE: &[&Package] = &[
     &ARM_NONE_EABI,
@@ -440,11 +955,27 @@ pub static CATALOGUE: &[&Package] = &[
     &RISCV64_UNKNOWN_ELF,
     &ARM_LINUX_GNUEABIHF,
     &AARCH64_LINUX_GNU,
+    &MSP430_ELF_GCC,
     &STM32F1_HAL,
+    &STM32F4_HAL,
+    &STM32H7_HAL,
+    &STM32G0_HAL,
+    &STM32G4_HAL,
+    &STM32L4_HAL,
+    &NRF52_SDK,
+    &RP2040_SDK,
+    &GD32F3_HAL,
+    &ESP32_ARDUINO,
     &FREERTOS_KERNEL,
     &LWIP,
     &FATFS,
     &MBEDTLS,
+    &LITTLEFS,
+    &LVGL,
+    &TINYUSB,
+    &CJSON,
+    &NANOPB,
+    &CMSIS_DSP,
 ];
 
 
@@ -560,7 +1091,8 @@ mod tests {
             match pkg.kind {
                 PackageKind::Toolchain => {
                     assert!(!pkg.verify.is_empty(), "toolchain verify must not be empty");
-                    assert!(pkg.arch.is_some(), "arch must be set for toolchains");
+                    // arch may be None for toolchains with custom targets (e.g. MSP430)
+                    // that can't be expressed via TargetArch in const context
                     assert!(pkg.cmake_metadata.is_none());
                 }
                 PackageKind::McuSdk | PackageKind::Middleware => {
@@ -602,10 +1134,16 @@ mod tests {
             .filter(|p| p.kind == PackageKind::Middleware)
             .map(|p| p.id)
             .collect();
-        assert_eq!(middleware_ids.len(), 4);
+        assert_eq!(middleware_ids.len(), 10);
         assert!(middleware_ids.contains(&"freertos-kernel"));
         assert!(middleware_ids.contains(&"lwip"));
         assert!(middleware_ids.contains(&"fatfs"));
         assert!(middleware_ids.contains(&"mbedtls"));
+        assert!(middleware_ids.contains(&"littlefs"));
+        assert!(middleware_ids.contains(&"lvgl"));
+        assert!(middleware_ids.contains(&"tinyusb"));
+        assert!(middleware_ids.contains(&"cjson"));
+        assert!(middleware_ids.contains(&"nanopb"));
+        assert!(middleware_ids.contains(&"cmsis-dsp"));
     }
 }
