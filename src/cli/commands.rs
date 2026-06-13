@@ -1254,6 +1254,9 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
     for f in &toolchain_args {
         cmd.arg(f);
     }
+    if cli.lsp {
+        cmd.arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
+    }
     let status = cmd
         .status()
         .map_err(|e| FbGenError::Config(format!("cmake: {e}")))?;
@@ -1262,6 +1265,19 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
         return Err(FbGenError::GenerationFailed(
             "cmake configure failed".into(),
         ));
+    }
+
+    // ── LSP symlink ──────────────────────────────────────────────────
+    if cli.lsp {
+        let cc_json = build_dir.join("compile_commands.json");
+        if cc_json.exists() {
+            match symlink_or_copy(&cc_json, &root.join("compile_commands.json")) {
+                Ok(()) => reporter.report_success("compile_commands.json -> project root"),
+                Err(e) => reporter.report_warning(&format!(
+                    "compile_commands.json symlink failed: {e}"
+                )),
+            }
+        }
     }
 
     // Build.
