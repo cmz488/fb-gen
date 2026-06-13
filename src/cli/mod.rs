@@ -69,6 +69,29 @@ pub enum Commands {
 
     /// Run the full pipeline: generate + cmake configure + build
     Run,
+
+    /// Install cross-compilation toolchains, MCU SDKs, or middleware
+    Install {
+        /// Package type: toolchain, sdk, or middleware
+        #[arg(long)]
+        kind: Option<String>,
+
+        /// Target architecture (e.g. xtensa, riscv32, NoneEabi)
+        #[arg(long)]
+        arch: Option<String>,
+
+        /// List available packages
+        #[arg(long)]
+        list: bool,
+
+        /// List installed packages
+        #[arg(long)]
+        list_installed: bool,
+
+        /// Dry run — show what would be installed without downloading
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Run the fb-gen CLI from parsed arguments.
@@ -81,6 +104,13 @@ pub fn run(cli: Cli) {
         Commands::Check => commands::cmd_check(&cli),
         Commands::Validate => commands::cmd_validate(&cli),
         Commands::Run => commands::cmd_run(&cli),
+        Commands::Install {
+            kind,
+            arch,
+            list,
+            list_installed,
+            dry_run,
+        } => commands::cmd_install(&cli, kind.as_deref(), arch.as_deref(), *list, *list_installed, *dry_run),
     };
 
     if let Err(e) = result {

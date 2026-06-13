@@ -20,6 +20,7 @@ use crate::models::{
     ProjectMeta,
 };
 use serde_json;
+use crate::install;
 use crate::orchestration::{FileWatcher, MetaCache, Reporter, UserQuery};
 use crate::scanner::{self, FffScanner};
 
@@ -1838,6 +1839,123 @@ fn load_or_default_config(root: &Path, output_dir: &Path) -> ProjectConfig {
         })
 }
 
+/// `fb-gen install` — download and configure toolchains, SDKs, or middleware.
+pub fn cmd_install(
+    cli: &Cli,
+    kind: Option<&str>,
+    arch: Option<&str>,
+    list: bool,
+    list_installed: bool,
+    dry_run: bool,
+) -> FbGenResult<()> {
+    let reporter = Reporter::new(cli.quiet);
+
+    // ── --list: show available packages ──
+    if list {
+        println!("  Available packages:");
+        println!();
+        for pkg in install::catalogue::CATALOGUE {
+            let arch_str = pkg
+                .arch
+                .as_ref()
+                .map(|a| format!("{:?}", a))
+                .unwrap_or_else(|| "\u{2014}".into());
+            println!(
+                "  {:30} {:15} v{}  ({})",
+                pkg.id, arch_str, pkg.version, pkg.name
+            );
+        }
+        println!();
+        return Ok(());
+    }
+
+    // ── --list-installed: show installed packages ──
+    if list_installed {
+        let root = install::resolve_install_root();
+        let installed_dir = root.join("installed");
+        if !installed_dir.exists() {
+            println!("  No packages installed yet.");
+            return Ok(());
+        }
+
+        println!("  Installed packages:");
+        println!();
+        for entry in std::fs::read_dir(&installed_dir)
+            .map_err(|e| {
+                FbGenError::Config(format!("Failed to read installed dir: {e}"))
+            })?
+            .flatten()
+        {
+            if entry.path().extension().map_or(false, |e| e == "json") {
+                let content =
+                    std::fs::read_to_string(entry.path()).unwrap_or_default();
+                if let Ok(record) =
+                    serde_json::from_str::<install::environment::InstalledRecord>(&content)
+                {
+                    println!(
+                        "  {} v{} — {}",
+                        record.id, record.version, record.installed_at
+                    );
+                }
+            }
+        }
+        println!();
+        return Ok(());
+    }
+
+    // ── Resolve package to install ──
+    let arch_filter = arch.unwrap_or("");
+    let pkg = install::catalogue::CATALOGUE
+        .iter()
+        .find(|p| {
+            if let Some(ref a) = p.arch {
+                format!("{:?}", a)
+                    .to_lowercase()
+                    .contains(&arch_filter.to_lowercase())
+            } else {
+                false
+            }
+        })
+        .ok_or_else(|| {
+            FbGenError::Config(format!(
+                "No package found for arch '{}'. Run `fb-gen install --list`.",
+                arch_filter
+            ))
+        })?;
+
+    reporter.report_info(&format!(
+        "Installing {} v{} ...",
+        pkg.name, pkg.version
+    ));
+
+    if dry_run {
+        let dl = pkg.downloads.for_current_platform().ok_or_else(|| {
+            FbGenError::Config("No download for current platform".into())
+        })?;
+        println!("  Would download from: {}", dl.url);
+        println!(
+            "  Would install to:    ~/.fb-gen/toolchains/{}/{}",
+            pkg.id, pkg.version
+        );
+        println!(
+            "  Platform:            {} {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        return Ok(());
+    }
+
+    // ── Execute install ──
+    install::install_package(pkg)?;
+
+    reporter.report_success(&format!("Installed {} v{}", pkg.id, pkg.version));
+    println!();
+    println!("  To activate, run: source ~/.fb-gen/env");
+    println!("  Or add to your shell profile: . ~/.fb-gen/env");
+
+    Ok(())
+}
+
 // ── tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1936,5 +2054,34 @@ mod cmake_format_tests {
     #[test]
     fn empty_line_unchanged() {
         assert_eq!(format_colored(""), "");
+    }
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+
+    #[test]
+    fn test_cmd_install_list_does_not_crash() {
+        let cli = Cli {
+            root: PathBuf::from("."),
+            exclude: vec![],
+            lang: "C".into(),
+            no_deps: false,
+            output: PathBuf::from("build"),
+            watch: false,
+            lsp: false,
+            verbose: 0,
+            quiet: true,
+            command: crate::cli::Commands::Install {
+                kind: None,
+                arch: None,
+                list: true,
+                list_installed: false,
+                dry_run: false,
+            },
+        };
+        // cmd_install with --list should not crash.
+        crate::cli::run(cli);
     }
 }
