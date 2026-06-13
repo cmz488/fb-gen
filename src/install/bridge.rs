@@ -1,8 +1,7 @@
 //! CMake bridge — collects source-file metadata from installed SDK packages
 //! and feeds it into the CMakeLists.txt generation pipeline.
 
-use crate::install::environment::InstalledRecord;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Sources collected from an installed SDK/middleware package,
 /// ready to be injected into CMakeLists.txt generation.
@@ -19,71 +18,50 @@ pub struct PackageSources {
 /// expand source globs, and return injectable `PackageSources`.
 pub fn scan_installed_packages() -> Vec<PackageSources> {
     use crate::install::catalogue::CATALOGUE;
+    use crate::install::environment::read_installed_records;
 
     let install_root = crate::install::resolve_install_root();
-    let installed_dir = install_root.join("installed");
-
-    if !installed_dir.exists() {
-        return Vec::new();
-    }
+    let records = read_installed_records(&install_root);
 
     let mut results: Vec<PackageSources> = Vec::new();
 
-    // Read all installed record JSON files.
-    let entries = match std::fs::read_dir(&installed_dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
+    for record in &records {
+        // Find matching catalogue entry to get cmake_metadata.
+        let catalogue_pkg = match CATALOGUE.iter().find(|p| p.id == record.id) {
+            Some(p) => p,
+            None => continue,
+        };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().map_or(false, |e| e == "json") {
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let record: InstalledRecord = match serde_json::from_str(&content) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
+        // Only SDKs and middleware have cmake_metadata.
+        let meta = match &catalogue_pkg.cmake_metadata {
+            Some(m) => m,
+            None => continue,
+        };
 
-            // Find matching catalogue entry to get cmake_metadata.
-            let catalogue_pkg = match CATALOGUE.iter().find(|p| p.id == record.id) {
-                Some(p) => p,
-                None => continue,
-            };
+        let prefix = PathBuf::from(&record.prefix_path);
 
-            // Only SDKs and middleware have cmake_metadata.
-            let meta = match &catalogue_pkg.cmake_metadata {
-                Some(m) => m,
-                None => continue,
-            };
-
-            let prefix = PathBuf::from(&record.prefix_path);
-
-            // Expand source globs.
-            let mut source_files: Vec<PathBuf> = Vec::new();
-            for glob_pattern in meta.source_globs {
-                let expanded = expand_simple_glob(&prefix, glob_pattern);
-                source_files.extend(expanded);
-            }
-
-            // Resolve include dirs to absolute paths.
-            let include_dirs: Vec<PathBuf> = meta
-                .include_dirs
-                .iter()
-                .map(|d| prefix.join(d))
-                .filter(|d| d.exists())
-                .collect();
-
-            results.push(PackageSources {
-                package_name: catalogue_pkg.name.to_string(),
-                include_dirs,
-                source_files,
-                compile_defines: meta.compile_defines.iter().map(|s| s.to_string()).collect(),
-                link_libraries: meta.link_libraries.iter().map(|s| s.to_string()).collect(),
-            });
+        // Expand source globs.
+        let mut source_files: Vec<PathBuf> = Vec::new();
+        for glob_pattern in meta.source_globs {
+            let expanded = expand_simple_glob(&prefix, glob_pattern);
+            source_files.extend(expanded);
         }
+
+        // Resolve include dirs to absolute paths.
+        let include_dirs: Vec<PathBuf> = meta
+            .include_dirs
+            .iter()
+            .map(|d| prefix.join(d))
+            .filter(|d| d.exists())
+            .collect();
+
+        results.push(PackageSources {
+            package_name: catalogue_pkg.name.to_string(),
+            include_dirs,
+            source_files,
+            compile_defines: meta.compile_defines.iter().map(|s| s.to_string()).collect(),
+            link_libraries: meta.link_libraries.iter().map(|s| s.to_string()).collect(),
+        });
     }
 
     results
@@ -101,6 +79,7 @@ fn expand_simple_glob(base_dir: &PathBuf, pattern: &str) -> Vec<PathBuf> {
     let (dir_part, suffix) = match pattern.rsplit_once('/') {
         Some((d, "*")) => (d, ""),  // pattern ends with "/*" -> match all files
         Some((d, f)) if f.starts_with('*') => (d, &f[1..]),  // "*.c" -> suffix ".c"
+        None if pattern.starts_with('*') => ("", &pattern[1..]),  // root-level "*.c"
         _ => return results,
     };
 
@@ -127,6 +106,36 @@ fn expand_simple_glob(base_dir: &PathBuf, pattern: &str) -> Vec<PathBuf> {
     // Sort for deterministic output.
     results.sort();
     results
+}
+
+/// Write `<root>/.fb-gen/cache/installed_packages.json` with the current
+/// set of globally-installed package IDs.
+///
+/// Only writes when the cache directory already exists (project has been
+/// init-ed).  No-op otherwise.
+pub fn write_installed_packages_marker(root: &Path) {
+    let cache_dir = root.join(".fb-gen").join("cache");
+    if !cache_dir.exists() {
+        return;
+    }
+
+    let install_root = crate::install::resolve_install_root();
+    let records = crate::install::environment::read_installed_records(&install_root);
+
+    let marker = serde_json::json!({
+        "packages": records.iter().map(|r| &r.id).collect::<Vec<_>>(),
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    let marker_path = cache_dir.join("installed_packages.json");
+    if let Err(e) = std::fs::write(
+        &marker_path,
+        serde_json::to_string_pretty(&marker).unwrap_or_default(),
+    ) {
+        // Non-fatal: sync will still work, just without this project's
+        // package list being up-to-date.
+        eprintln!("fb-gen: warning: failed to write installed packages marker: {e}");
+    }
 }
 
 #[cfg(test)]
