@@ -33,6 +33,10 @@ pub struct Cli {
     #[arg(short = 'w', long, global = true)]
     pub watch: bool,
 
+    /// Generate compile_commands.json after command completes (for LSP / clangd)
+    #[arg(long, global = true)]
+    pub lsp: bool,
+
     /// Verbosity level (-v for info, -vv for debug, -vvv for trace)
     #[arg(short = 'v', long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
