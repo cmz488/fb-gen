@@ -1,5 +1,5 @@
-./target
-./docs
+target
+docs
 ./test
 CLAUDE.md
 design.md
