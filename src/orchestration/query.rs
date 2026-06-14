@@ -79,6 +79,20 @@ impl UserQuery {
             "17".to_string()
         };
 
+        // ── build system ───────────────────────────────────────────
+        println!();
+        println!("  Build system:");
+        println!("    1) CMake  (default)");
+        println!("    2) Zig    (single binary, built-in cross-compilation)");
+        let bs_choice = prompt_with_default("Choose build system [1-2]", "1").map_err(|e| {
+            crate::models::FbGenError::Config(format!("failed to read build system: {e}"))
+        })?;
+        let build_system = match bs_choice.as_str() {
+            "2" => crate::models::project::BuildSystem::Zig,
+            _ => crate::models::project::BuildSystem::CMake,
+        };
+        let is_zig = build_system == crate::models::project::BuildSystem::Zig;
+
         // ── target architecture ───────────────────────────────────
         println!();
         println!("  Target architecture:");
@@ -483,57 +497,68 @@ impl UserQuery {
             }
         }
 
-        // ── compiler ──────────────────────────────────────────────
-        println!();
-        println!("  Compiler:");
-        println!("    1) GCC    (default)");
-        println!("    2) Clang");
-        println!("    3) MSVC");
-        println!("    4) Custom");
-        let cc_choice = prompt_with_default("Choose compiler [1-4]", "1").map_err(|e| {
-            crate::models::FbGenError::Config(format!("failed to read compiler: {e}"))
-        })?;
-        let compiler = match cc_choice.as_str() {
-            "2" => Compiler::Clang,
-            "3" => Compiler::MSVC,
-            "4" => {
-                let custom = prompt("  Custom compiler name: ").map_err(|e| {
-                    crate::models::FbGenError::Config(format!(
-                        "failed to read custom compiler: {e}"
-                    ))
-                })?;
-                Compiler::Custom(custom)
+        // ── compiler (CMake only; Zig is its own compiler) ─────────
+        let compiler = if is_zig {
+            Compiler::Zig
+        } else {
+            println!();
+            println!("  Compiler:");
+            println!("    1) GCC    (default)");
+            println!("    2) Clang");
+            println!("    3) MSVC");
+            println!("    4) Custom");
+            let cc_choice = prompt_with_default("Choose compiler [1-4]", "1").map_err(|e| {
+                crate::models::FbGenError::Config(format!("failed to read compiler: {e}"))
+            })?;
+            match cc_choice.as_str() {
+                "2" => Compiler::Clang,
+                "3" => Compiler::MSVC,
+                "4" => {
+                    let custom = prompt("  Custom compiler name: ").map_err(|e| {
+                        crate::models::FbGenError::Config(format!(
+                            "failed to read custom compiler: {e}"
+                        ))
+                    })?;
+                    Compiler::Custom(custom)
+                }
+                _ => Compiler::GCC,
             }
-            _ => Compiler::GCC,
         };
 
-        // ── build backend ─────────────────────────────────────────
-        println!();
-        println!("  Build backend:");
-        println!("    1) Ninja (default)");
-        println!("    2) Make");
-        println!("    3) MSBuild");
-        println!("    4) Custom");
-        let backend_choice = prompt_with_default("Choose backend [1-4]", "1").map_err(|e| {
-            crate::models::FbGenError::Config(format!("failed to read build backend: {e}"))
-        })?;
-        let build_backend = match backend_choice.as_str() {
-            "2" => BuildBackend::Make,
-            "3" => BuildBackend::MSBuild,
-            "4" => {
-                let custom = prompt("  Custom backend name: ").map_err(|e| {
-                    crate::models::FbGenError::Config(format!("failed to read custom backend: {e}"))
-                })?;
-                BuildBackend::Custom(custom)
+        // ── build backend (CMake only; Zig is its own build system) ─
+        let build_backend = if is_zig {
+            BuildBackend::Ninja // unused by zig; set to default
+        } else {
+            println!();
+            println!("  Build backend:");
+            println!("    1) Ninja (default)");
+            println!("    2) Make");
+            println!("    3) MSBuild");
+            println!("    4) Custom");
+            let backend_choice = prompt_with_default("Choose backend [1-4]", "1").map_err(|e| {
+                crate::models::FbGenError::Config(format!("failed to read build backend: {e}"))
+            })?;
+            match backend_choice.as_str() {
+                "2" => BuildBackend::Make,
+                "3" => BuildBackend::MSBuild,
+                "4" => {
+                    let custom = prompt("  Custom backend name: ").map_err(|e| {
+                        crate::models::FbGenError::Config(format!("failed to read custom backend: {e}"))
+                    })?;
+                    BuildBackend::Custom(custom)
+                }
+                _ => BuildBackend::Ninja,
             }
-            _ => BuildBackend::Ninja,
         };
 
-        // ── CMake minimum version ─────────────────────────────────
-        let cmake_min_version =
+        // ── CMake minimum version (CMake only) ─────────────────────
+        let cmake_min_version = if is_zig {
+            "3.16".to_string()
+        } else {
             prompt_with_default("CMake minimum version", "3.16").map_err(|e| {
                 crate::models::FbGenError::Config(format!("failed to read CMake version: {e}"))
-            })?;
+            })?
+        };
 
         // ── output directory ──────────────────────────────────────
         let output_dir_str = prompt_with_default("Output directory", "build").map_err(|e| {
@@ -559,7 +584,7 @@ impl UserQuery {
             cmake_presets: None,
             toolchain_files: vec![],
             toolchain,
-            build_system: Default::default(),
+            build_system,
         };
 
         Ok(config)
@@ -579,9 +604,12 @@ impl UserQuery {
             println!("  C++ standard:      C++{}", config.cpp_standard);
         }
         println!("  Architecture:      {:?}", config.target_arch);
-        println!("  Compiler:          {:?}", config.compiler);
-        println!("  Build backend:     {:?}", config.build_backend);
-        println!("  CMake min version: {}", config.cmake_min_version);
+        println!("  Build system:      {:?}", config.build_system);
+        if config.build_system != crate::models::project::BuildSystem::Zig {
+            println!("  Compiler:          {:?}", config.compiler);
+            println!("  Build backend:     {:?}", config.build_backend);
+            println!("  CMake min version: {}", config.cmake_min_version);
+        }
         println!("  Root:              {}", config.root.display());
         println!("  Output dir:        {}", config.output_dir.display());
         if let Some(ref tc) = config.toolchain {

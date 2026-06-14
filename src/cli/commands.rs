@@ -183,12 +183,24 @@ fn scan_and_discover(
 /// Check that required external tools (cmake, compiler) are available on PATH.
 /// Reports warnings for missing tools; never blocks the user.
 fn check_required_tools(config: &ProjectConfig, reporter: &Reporter) {
-    // ── cmake ─────────────────────────────────────────────────────────
-    match find_on_path("cmake") {
-        Some(path) => reporter.report_info(&format!("cmake found: {}", path.display())),
-        None => reporter.report_warning(
-            "cmake not found on PATH.  Install cmake or add it to PATH before running `fb-gen run`."
-        ),
+    // ── build tool ───────────────────────────────────────────────────
+    match config.build_system {
+        BuildSystem::CMake => {
+            match find_on_path("cmake") {
+                Some(path) => reporter.report_info(&format!("cmake found: {}", path.display())),
+                None => reporter.report_warning(
+                    "cmake not found on PATH. Install it before running `fb-gen run`."
+                ),
+            }
+        }
+        BuildSystem::Zig => {
+            match find_on_path("zig") {
+                Some(path) => reporter.report_info(&format!("zig found: {}", path.display())),
+                None => reporter.report_warning(
+                    "zig not found on PATH. Install it before running `fb-gen run`."
+                ),
+            }
+        }
     }
 
     // ── Compiler ──────────────────────────────────────────────────────
@@ -487,6 +499,11 @@ fn generate_compile_commands(
     config: &ProjectConfig,
     reporter: &Reporter,
 ) {
+    if config.build_system == BuildSystem::Zig {
+        generate_compile_commands_zig(root, reporter);
+        return;
+    }
+
     // Resolve the absolute build directory (config.output_dir may be relative).
     let abs_build_dir = if build_dir.is_absolute() {
         build_dir.to_path_buf()
@@ -1402,64 +1419,72 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
         }
     }
 
-    let gen_str = if gen_flags.is_empty() {
-        String::new()
-    } else {
-        format!(" -G {}", gen_flags[1])
-    };
-    reporter.report_info(&format!(
-        "Configuring with cmake -S {} -B {}{} ...",
-        root.display(),
-        build_dir.display(),
-        gen_str
-    ));
-
-    let mut cmd = Command::new("cmake");
-    cmd.arg("-S").arg(&root).arg("-B").arg(&build_dir);
-    for f in &gen_flags {
-        cmd.arg(f);
-    }
-    for f in &toolchain_args {
-        cmd.arg(f);
-    }
-    if cli.lsp {
-        cmd.arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
-    }
-    with_toolchain_path(&mut cmd, &config);
-    let (status, _cfg_lines) = run_cmake_formatted(&mut cmd, cli.quiet)
-        .map_err(|e| FbGenError::Config(format!("cmake: {e}")))?;
-
-    if !status.success() {
-        return Err(FbGenError::GenerationFailed(
-            "cmake configure failed".into(),
-        ));
-    }
-
-    // ── LSP symlink ──────────────────────────────────────────────────
-    if cli.lsp {
-        let cc_json = build_dir.join("compile_commands.json");
-        if cc_json.exists() {
-            match symlink_or_copy(&cc_json, &root.join("compile_commands.json")) {
-                Ok(()) => reporter.report_success("compile_commands.json -> project root"),
-                Err(e) => reporter.report_warning(&format!(
-                    "compile_commands.json symlink failed: {e}"
-                )),
-            }
-        }
-    }
-
-    // Build.
-    reporter.report_info(&format!(
-        "Building with cmake --build {} ...",
-        build_dir.display()
-    ));
     let start = Instant::now();
+    let (status, build_lines) = match config.build_system {
+        BuildSystem::CMake => {
+            let gen_str = if gen_flags.is_empty() {
+                String::new()
+            } else {
+                format!(" -G {}", gen_flags[1])
+            };
+            reporter.report_info(&format!(
+                "Configuring with cmake -S {} -B {}{} ...",
+                root.display(),
+                build_dir.display(),
+                gen_str
+            ));
 
-    let mut build_cmd = Command::new("cmake");
-    build_cmd.arg("--build").arg(&build_dir);
-    with_toolchain_path(&mut build_cmd, &config);
-    let (status, build_lines) = run_cmake_formatted(&mut build_cmd, cli.quiet)
-        .map_err(|e| FbGenError::Config(format!("cmake --build: {e}")))?;
+            let mut cmd = Command::new("cmake");
+            cmd.arg("-S").arg(&root).arg("-B").arg(&build_dir);
+            for f in &gen_flags {
+                cmd.arg(f);
+            }
+            for f in &toolchain_args {
+                cmd.arg(f);
+            }
+            if cli.lsp {
+                cmd.arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
+            }
+            with_toolchain_path(&mut cmd, &config);
+            let (s, _cfg_lines) = run_cmake_formatted(&mut cmd, cli.quiet)
+                .map_err(|e| FbGenError::Config(format!("cmake: {e}")))?;
+            if !s.success() {
+                return Err(FbGenError::GenerationFailed("cmake configure failed".into()));
+            }
+
+            // ── LSP symlink ──────────────────────────────────────────
+            if cli.lsp {
+                let cc_json = build_dir.join("compile_commands.json");
+                if cc_json.exists() {
+                    match symlink_or_copy(&cc_json, &root.join("compile_commands.json")) {
+                        Ok(()) => reporter.report_success("compile_commands.json -> project root"),
+                        Err(e) => reporter.report_warning(&format!(
+                            "compile_commands.json symlink failed: {e}"
+                        )),
+                    }
+                }
+            }
+
+            // Build.
+            reporter.report_info(&format!(
+                "Building with cmake --build {} ...",
+                build_dir.display()
+            ));
+            let mut build_cmd = Command::new("cmake");
+            build_cmd.arg("--build").arg(&build_dir);
+            with_toolchain_path(&mut build_cmd, &config);
+            run_cmake_formatted(&mut build_cmd, cli.quiet)
+                .map_err(|e| FbGenError::Config(format!("cmake --build: {e}")))?
+        }
+        BuildSystem::Zig => {
+            reporter.report_info("Building with zig build ...");
+            let mut build_cmd = Command::new("zig");
+            build_cmd.arg("build").current_dir(&root);
+            let (s, lines) = run_cmake_formatted(&mut build_cmd, cli.quiet)
+                .map_err(|e| FbGenError::Config(format!("zig build: {e}")))?;
+            (s, lines)
+        }
+    };
 
     if status.success() {
         let elapsed = start.elapsed();
@@ -1924,6 +1949,101 @@ fn generate_build_files(
         BuildSystem::Zig => {
             let generator = ZigGenerator::new(config)?;
             generator.generate(modules, graph, force, user_modules)
+        }
+    }
+}
+
+/// Generate `compile_commands.json` for a Zig project by parsing
+/// `zig build --verbose` output.
+fn generate_compile_commands_zig(root: &Path, reporter: &Reporter) {
+    reporter.report_info("Generating compile_commands.json via zig build --verbose ...");
+
+    // Remove cache so zig rebuilds and outputs compile commands.
+    let cache_dir = root.join(".zig-cache");
+    let _ = std::fs::remove_dir_all(&cache_dir);
+
+    let output = match std::process::Command::new("zig")
+        .arg("build")
+        .arg("--verbose")
+        .current_dir(root)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            reporter.report_warning(&format!("Failed to run zig build --verbose: {e}"));
+            return;
+        }
+    };
+
+    if !output.status.success() {
+        reporter.report_warning("zig build --verbose failed; compile_commands.json not generated.");
+        return;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stderr);
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("install") {
+            continue;
+        }
+
+        // Parse: /usr/bin/zig build-exe /path/to/src.cpp ... -I /path ...
+        // or:    /usr/bin/zig build-lib /path/to/lib.cpp ... -I /path ...
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+
+        let is_build = parts.get(1).map_or(false, |s| *s == "build-exe" || *s == "build-lib");
+        if !is_build || parts.len() < 3 {
+            continue;
+        }
+
+        let source_file = parts[2].to_string();
+
+        // Collect -I directories
+        let mut includes: Vec<String> = Vec::new();
+        let mut i = 3;
+        while i < parts.len() {
+            if parts[i] == "-I" && i + 1 < parts.len() {
+                includes.push(parts[i + 1].to_string());
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+
+        let command_parts: Vec<&str> = parts.iter().copied()
+            .filter(|p| !p.starts_with("--listen") && !p.starts_with("--cache-dir")
+                    && !p.starts_with("--global-cache-dir") && !p.starts_with("--zig-lib-dir")
+                    && !p.starts_with("-Mroot"))
+            .collect();
+
+        entries.push(serde_json::json!({
+            "directory": root.to_string_lossy(),
+            "file": source_file,
+            "arguments": command_parts,
+            "output": format!("zig-out/{}", source_file.replace('/', "_").replace(".cpp", ".o").replace(".c", ".o")),
+        }));
+    }
+
+    let cc_json = serde_json::json!(entries);
+    match serde_json::to_string_pretty(&cc_json) {
+        Ok(json_str) => {
+            let dest = root.join("compile_commands.json");
+            if let Err(e) = std::fs::write(&dest, &json_str) {
+                reporter.report_warning(&format!("Failed to write compile_commands.json: {e}"));
+            } else {
+                reporter.report_success(&format!(
+                    "compile_commands.json written ({} entries)",
+                    entries.len()
+                ));
+            }
+        }
+        Err(e) => {
+            reporter.report_warning(&format!("Failed to serialize compile_commands.json: {e}"));
         }
     }
 }

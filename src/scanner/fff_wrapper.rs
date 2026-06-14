@@ -95,7 +95,6 @@ impl FffScanner {
                 .unwrap_or("")
                 .to_string();
 
-            let size_bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
             sources.push(SourceFile {
                 path,
@@ -103,7 +102,6 @@ impl FffScanner {
                 file_name,
                 source_type,
                 includes,
-                size_bytes,
             });
         }
 
@@ -153,15 +151,12 @@ impl FffScanner {
             .unwrap_or("")
             .to_string();
 
-        let size_bytes = fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
-
         Ok(SourceFile {
             path: file_path.to_path_buf(),
             relative_path,
             file_name,
             source_type,
             includes,
-            size_bytes,
         })
     }
 

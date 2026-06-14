@@ -19,7 +19,6 @@ pub struct DependencyEdge {
     pub from: String,
     pub to: String,
     pub dep_type: DependencyType,
-    pub reason: String,
 }
 
 /// Wraps a petgraph `DiGraph` to model module-level dependencies.

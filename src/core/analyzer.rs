@@ -80,7 +80,7 @@ impl DependencyAnalyzer {
                     )
                     .collect();
 
-            for (include_str, label) in &all_includes {
+            for (include_str, _label) in &all_includes {
                 // Extract first path segment before '/'.
                 let first_segment = include_str.split('/').next().unwrap_or(include_str);
 
@@ -131,18 +131,6 @@ impl DependencyAnalyzer {
                         from: module.name.clone(),
                         to: target_name,
                         dep_type: DependencyType::Public,
-                        reason: format!(
-                            "#include \"{}\" in {} {}",
-                            include_str,
-                            label,
-                            if *label == "source" {
-                                "source"
-                            } else if *label == "asm" {
-                                "asm source"
-                            } else {
-                                "header"
-                            }
-                        ),
                     });
                 }
             }

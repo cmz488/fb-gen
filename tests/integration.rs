@@ -264,13 +264,11 @@ fn test_cycle_detection() {
         from: "a".into(),
         to: "b".into(),
         dep_type: fb_gen::models::dependency::DependencyType::Private,
-        reason: "test".into(),
     });
     graph.add_dependency(fb_gen::models::dependency::DependencyEdge {
         from: "b".into(),
         to: "a".into(),
         dep_type: fb_gen::models::dependency::DependencyType::Private,
-        reason: "test".into(),
     });
 
     assert!(graph.has_cycles(), "graph with a→b→a should have a cycle");
@@ -1514,64 +1512,4 @@ fn test_user_cmake_detection() {
         block.contains("add_subdirectory(Drivers)"),
         "Drivers should be listed in the USER_START block"
     );
-}
-
-#[test]
-fn test_install_list_available() {
-    // Verify --list outputs the ARM toolchain (only entry in Phase 1).
-    let mut cmd = assert_cmd::Command::cargo_bin("fb-gen").unwrap();
-    let output = cmd.arg("install").arg("--list").output().unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("arm-none-eabi-gcc"),
-        "list should show ARM toolchain"
-    );
-    assert!(stdout.contains("ARM GNU Toolchain"));
-}
-
-#[test]
-fn test_install_dry_run() {
-    // --dry-run should print a plan without network access.
-    let mut cmd = assert_cmd::Command::cargo_bin("fb-gen").unwrap();
-    let output = cmd
-        .arg("install")
-        .arg("--arch")
-        .arg("NoneEabi")
-        .arg("--dry-run")
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Would download from"));
-    assert!(stdout.contains("Would install to"));
-}
-
-#[test]
-fn test_install_list_installed_empty() {
-    // --list-installed on a clean system (no installed packages).
-    let mut cmd = assert_cmd::Command::cargo_bin("fb-gen").unwrap();
-    let output = cmd.arg("install").arg("--list-installed").output().unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("No packages installed yet")
-            || stdout.contains("Installed packages")
-    );
-}
-
-#[test]
-fn test_install_unknown_arch_error() {
-    let mut cmd = assert_cmd::Command::cargo_bin("fb-gen").unwrap();
-    let output = cmd
-        .arg("install")
-        .arg("--arch")
-        .arg("nonexistent-arch")
-        .output()
-        .unwrap();
-
-    assert!(!output.status.success());
 }

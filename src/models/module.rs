@@ -51,7 +51,6 @@ pub struct SourceFile {
     pub file_name: String,
     pub source_type: SourceType,
     pub includes: Vec<String>,
-    pub size_bytes: u64,
 }
 
 /// The type of build target for a module.
@@ -80,7 +79,6 @@ pub struct CMakeModule {
     pub compile_features: Vec<String>,
     pub compile_definitions: Vec<String>,
     pub include_dirs: Vec<PathBuf>,
-    pub user_config: Option<String>,
 }
 
 impl CMakeModule {

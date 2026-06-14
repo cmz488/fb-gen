@@ -31,7 +31,11 @@ project({{ project_name }} VERSION {{ version }} LANGUAGES {{ languages }})
 
 # ── Global include directories ──────────────────────────────────────────────
 {% for d in global_include_dirs -%}
+{%- if d is starting_with("/") or d is starting_with("${") %}
+include_directories({{ d }})
+{%- else %}
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/{{ d }})
+{%- endif %}
 {% endfor %}
 
 {% if has_cpp -%}
@@ -779,15 +783,6 @@ impl CMakeGenerator {
 
     /// Resolve the output path for the fb-gen-generated toolchain file.
     ///
-    /// Always returns `cmake/toolchain.cmake` under the project root.
-    /// Callers must first check [`user_has_toolchain_file`] — if the user
-    /// already has their own toolchain file, fb-gen will not generate one
-    /// and this method is never reached.
-    #[allow(dead_code)]
-    fn resolve_toolchain_path(&self) -> PathBuf {
-        self.config.root.join("cmake").join("toolchain.cmake")
-    }
-
     // ── Toolchain helpers ────────────────────────────────────────────────
 
     /// Resolve a path from a CMakePresets `toolchainFile` string.
@@ -1045,7 +1040,7 @@ impl CMakeGenerator {
 
 /// Returns the cross-compilation context tuple:
 /// `(is_cross, system_name, system_processor, c_compiler, cxx_compiler, asm_compiler, linker_flags)`
-#[allow(dead_code)]
+#[cfg(test)]
 fn cross_compile_context(
     arch: &TargetArch,
 ) -> (bool, String, String, String, String, String, String) {

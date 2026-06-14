@@ -141,7 +141,6 @@ impl ModuleDiscoverer {
                 compile_features: vec![],
                 compile_definitions: vec![],
                 include_dirs,
-                user_config: None,
             };
 
             modules.push(module);
@@ -168,7 +167,6 @@ impl ModuleDiscoverer {
                     compile_features: vec![],
                     compile_definitions: vec![],
                     include_dirs: vec![PathBuf::from(".")],
-                    user_config: None,
                 };
                 modules.push(root_module);
             }
@@ -267,23 +265,6 @@ fn collect_include_dirs(dir: &Path, files: &[&SourceFile]) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::module::{SourceFile, SourceType};
-
-    #[allow(dead_code)]
-    fn make_source(path: &str, st: SourceType, includes: Vec<&str>) -> SourceFile {
-        SourceFile {
-            path: PathBuf::from(path),
-            relative_path: PathBuf::from(path),
-            file_name: Path::new(path)
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .to_string(),
-            source_type: st,
-            includes: includes.iter().map(|s| s.to_string()).collect(),
-            size_bytes: 0,
-        }
-    }
 
     #[test]
     fn test_has_main_detection() {
