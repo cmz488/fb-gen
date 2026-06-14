@@ -51,11 +51,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize a new fb-gen project (creates CMakeLists.txt)
+    /// Initialize a new fb-gen project (creates build files)
     Init {
         /// Project name
         #[arg(short, long)]
         name: Option<String>,
+
+        /// Build system: cmake or zig
+        #[arg(long)]
+        build: Option<String>,
     },
 
     /// Sync: scan sources and update CMakeLists.txt incrementally
@@ -69,37 +73,6 @@ pub enum Commands {
 
     /// Run the full pipeline: generate + cmake configure + build
     Run,
-
-    /// Install cross-compilation toolchains, MCU SDKs, or middleware
-    Install {
-        /// Package type: toolchain, sdk, or middleware
-        #[arg(long)]
-        kind: Option<String>,
-
-        /// Target architecture (e.g. xtensa, riscv32, NoneEabi)
-        #[arg(long)]
-        arch: Option<String>,
-
-        /// List available packages
-        #[arg(long)]
-        list: bool,
-
-        /// List installed packages
-        #[arg(long)]
-        list_installed: bool,
-
-        /// Dry run — show what would be installed without downloading
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Uninstall a package by ID
-        #[arg(long)]
-        uninstall: Option<String>,
-
-        /// Upgrade a package to the latest version
-        #[arg(long)]
-        upgrade: Option<String>,
-    },
 }
 
 /// Run the fb-gen CLI from parsed arguments.
@@ -107,20 +80,11 @@ pub fn run(cli: Cli) {
     use crate::cli::commands;
 
     let result = match &cli.command {
-        Commands::Init { name } => commands::cmd_init(&cli, name.as_deref()),
+        Commands::Init { name, build } => commands::cmd_init(&cli, name.as_deref(), build.as_deref()),
         Commands::Sync => commands::cmd_sync(&cli),
         Commands::Check => commands::cmd_check(&cli),
         Commands::Validate => commands::cmd_validate(&cli),
         Commands::Run => commands::cmd_run(&cli),
-        Commands::Install {
-            kind,
-            arch,
-            list,
-            list_installed,
-            dry_run,
-            uninstall,
-            upgrade,
-        } => commands::cmd_install(&cli, kind.as_deref(), arch.as_deref(), *list, *list_installed, *dry_run, uninstall.as_deref(), upgrade.as_deref()),
     };
 
     if let Err(e) = result {

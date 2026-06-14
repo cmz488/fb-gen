@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub enum Compiler {
     GCC,
     Clang,
+    Zig,
     MSVC,
     Custom(String),
 }
@@ -38,6 +39,14 @@ pub enum BuildBackend {
     Make,
     MSBuild,
     Custom(String),
+}
+
+/// Build system for code generation — CMake or Zig.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BuildSystem {
+    #[default]
+    CMake,
+    Zig,
 }
 
 /// Structured toolchain configuration for embedded cross-compilation targets.
@@ -133,6 +142,9 @@ pub struct ProjectConfig {
     /// Toolchain configuration for cross-compilation targets.
     /// `None` when the target architecture does not require a toolchain file.
     pub toolchain: Option<ToolchainConfig>,
+    /// Build system: CMake (default) or Zig.
+    #[serde(default)]
+    pub build_system: BuildSystem,
 }
 
 impl Default for ProjectConfig {
@@ -156,6 +168,7 @@ impl Default for ProjectConfig {
             cmake_presets: None,
             toolchain_files: vec![],
             toolchain: None,
+            build_system: BuildSystem::default(),
     }
     }
 }
@@ -175,11 +188,6 @@ pub struct ProjectMeta {
     pub dependency_graph: DependencySnapshot,
     pub file_checksums: HashMap<String, String>,
     pub last_sync: String,
-    /// Hash of .fb-gen/cache/installed_packages.json.
-    /// Used to detect install/uninstall changes between syncs.
-    /// Empty when no packages have ever been installed for this project.
-    #[serde(default)]
-    pub installed_packages_hash: String,
 }
 
 /// Parsed content of CMakePresets.json.

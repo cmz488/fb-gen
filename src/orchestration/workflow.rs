@@ -289,6 +289,7 @@ mod tests {
             cmake_presets: None,
             toolchain_files: vec![],
             toolchain: None,
+            build_system: Default::default(),
         }
     }
 

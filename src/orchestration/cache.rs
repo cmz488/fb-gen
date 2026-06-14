@@ -90,9 +90,9 @@ impl MetaCache {
             "output_dir": meta.config.output_dir,
             "enable_watch": meta.config.enable_watch,
             "generated_at": meta.config.generated_at,
+            "build_system": meta.config.build_system,
             "dependency_graph": meta.dependency_graph,
             "last_sync": meta.last_sync,
-            "installed_packages_hash": meta.installed_packages_hash,
         });
 
         // Include cmake_presets if present.
@@ -222,6 +222,10 @@ impl MetaCache {
             toolchain: project_json
                 .get("toolchain")
                 .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            build_system: project_json
+                .get("build_system")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default(),
         };
 
         let dependency_graph: crate::models::DependencySnapshot =
@@ -233,19 +237,12 @@ impl MetaCache {
             .unwrap_or("")
             .to_string();
 
-        let installed_packages_hash = project_json
-            .get("installed_packages_hash")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
         Some(ProjectMeta {
             config,
             modules,
             dependency_graph,
             file_checksums,
             last_sync,
-            installed_packages_hash,
         })
     }
 
@@ -327,6 +324,7 @@ mod tests {
                 cmake_presets: None,
                 toolchain_files: vec![],
                 toolchain: None,
+                build_system: Default::default(),
             },
             modules: vec![],
             dependency_graph: DependencySnapshot {
@@ -335,7 +333,6 @@ mod tests {
             },
             file_checksums: HashMap::new(),
             last_sync: "2025-01-01T00:00:00Z".into(),
-            installed_packages_hash: String::new(),
         }
     }
 

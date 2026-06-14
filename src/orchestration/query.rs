@@ -559,6 +559,7 @@ impl UserQuery {
             cmake_presets: None,
             toolchain_files: vec![],
             toolchain,
+            build_system: Default::default(),
         };
 
         Ok(config)

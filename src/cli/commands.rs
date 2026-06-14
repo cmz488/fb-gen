@@ -12,7 +12,8 @@ use colored::{Color, Colorize};
 use regex::Regex;
 
 use crate::cli::Cli;
-use crate::core::{CMakeGenerator, DependencyAnalyzer, ModuleDiscoverer};
+use crate::core::{CMakeGenerator, DependencyAnalyzer, ModuleDiscoverer, ZigGenerator};
+use crate::models::project::BuildSystem;
 use crate::models::dependency::DependencyGraph;
 use crate::models::module::SourceFile;
 use crate::models::{
@@ -20,7 +21,6 @@ use crate::models::{
     ProjectMeta,
 };
 use serde_json;
-use crate::install;
 use crate::orchestration::{FileWatcher, MetaCache, Reporter, UserQuery};
 use crate::scanner::{self, FffScanner};
 
@@ -113,114 +113,10 @@ fn discoverer_opts(cli: &Cli, config: &ProjectConfig) -> crate::core::ScanOption
     crate::core::ScanOptions { root, exclude_dirs }
 }
 
-/// Scan installed SDK packages via the bridge and inject their sources into
-/// the module list.  Returns the number of SDK packages found.
-fn inject_installed_packages(
-    modules: &mut Vec<CMakeModule>,
-    reporter: &Reporter,
-) -> usize {
-    let packages = crate::install::bridge::scan_installed_packages();
 
-    if packages.is_empty() {
-        return 0;
-    }
 
-    // Find target module first.
-    let target_idx = modules
-        .iter()
-        .position(|m| m.has_main)
-        .or_else(|| modules.iter().position(|m| m.is_root));
 
-    let target = match target_idx {
-        Some(idx) => &mut modules[idx],
-        None => {
-            // No module to inject into — report and return 0.
-            reporter.report_warning("No target module found for SDK injection");
-            return 0;
-        }
-    };
 
-    let mut injected = 0;
-    for pkg in &packages {
-        reporter.report_info(&format!(
-            "Injecting installed SDK: {} ({} include dirs, {} source files)",
-            pkg.package_name,
-            pkg.include_dirs.len(),
-            pkg.source_files.len(),
-        ));
-
-        // Add include directories.
-        for inc_dir in &pkg.include_dirs {
-            if !target.include_dirs.contains(inc_dir) {
-                target.include_dirs.push(inc_dir.clone());
-            }
-        }
-
-        // Add compile definitions.
-        for def in &pkg.compile_defines {
-            if !target.compile_definitions.contains(def) {
-                target.compile_definitions.push(def.clone());
-            }
-        }
-
-        // Convert source files to synthetic SourceFile entries.
-        for src_path in &pkg.source_files {
-            let sf = SourceFile {
-                path: src_path.clone(),
-                relative_path: src_path.clone(),
-                file_name: src_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                source_type: crate::models::module::SourceType::from_extension(
-                    src_path.extension().unwrap_or_default().to_str().unwrap_or("c"),
-                ),
-                includes: Vec::new(),
-                size_bytes: 0,
-            };
-            target.sources.push(sf);
-        }
-
-        injected += 1;
-    }
-
-    injected
-}
-
-/// Compute a hash of `<root>/.fb-gen/cache/installed_packages.json`.
-///
-/// Returns an empty string when the marker file does not exist (no packages
-/// have ever been installed for this project, or project hasn't been init-ed).
-/// Compute a djb2 hash of `<root>/.fb-gen/cache/installed_packages.json`.
-///
-/// djb2 is a simple, stable hash — unlike `DefaultHasher`, its output is
-/// guaranteed not to change across Rust toolchain versions.
-///
-/// Returns an empty string when the marker file does not exist (no packages
-/// have ever been installed for this project, or project hasn't been init-ed).
-fn compute_installed_packages_hash(root: &Path) -> String {
-    let marker_path = root
-        .join(".fb-gen")
-        .join("cache")
-        .join("installed_packages.json");
-    match std::fs::read(&marker_path) {
-        Ok(data) => {
-            let hash = djb2_hash(&data);
-            format!("{hash:016x}")
-        }
-        Err(_) => String::new(),
-    }
-}
-
-/// djb2 hash — simple, stable, deterministic across Rust versions.
-fn djb2_hash(data: &[u8]) -> u64 {
-    let mut hash: u64 = 5381;
-    for &byte in data {
-        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
-    }
-    hash
-}
 
 /// Run the full scan → discover → analyze pipeline. Returns modules + optional dep graph.
 fn scan_and_discover(
@@ -317,6 +213,7 @@ fn check_required_tools(config: &ProjectConfig, reporter: &Reporter) {
         _ => match &config.compiler {
             Compiler::GCC => "gcc".to_string(),
             Compiler::Clang => "clang".to_string(),
+            Compiler::Zig => "zig".to_string(),
             Compiler::MSVC => "cl".to_string(),
             Compiler::Custom(ref name) => name.clone(),
         },
@@ -354,7 +251,7 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 // ── commands ───────────────────────────────────────────────────────────────
 
 /// `fb-gen init` — interactive first-time project setup.
-pub fn cmd_init(cli: &Cli, name: Option<&str>) -> FbGenResult<()> {
+pub fn cmd_init(cli: &Cli, name: Option<&str>, build: Option<&str>) -> FbGenResult<()> {
     let reporter = Reporter::new(cli.quiet);
 
     // ── Collect config ──
@@ -369,6 +266,14 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>) -> FbGenResult<()> {
     // Override project name if given on the command line.
     if let Some(n) = name {
         config.name = n.to_string();
+    }
+
+    // Override build system if given on the command line.
+    match build {
+        Some("zig") => config.build_system = BuildSystem::Zig,
+        Some("cmake") => config.build_system = BuildSystem::CMake,
+        Some(other) => reporter.report_warning(&format!("Unknown build system '{}', using default", other)),
+        None => {}
     }
 
     // Override from CLI flags.
@@ -388,22 +293,17 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>) -> FbGenResult<()> {
 
     // ── Pipeline ──
     let start = Instant::now();
-    let (mut modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
-
-    // ── Inject installed SDK packages ──
-    let sdk_count = inject_installed_packages(&mut modules, &reporter);
-    if sdk_count > 0 {
-        reporter.report_success(&format!("Injected {} installed SDK package(s)", sdk_count));
-    }
+    let (modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
 
     // ── Generate ──
-    reporter.report_info("Generating CMakeLists.txt files ...");
-    let generator = CMakeGenerator::new(&config)?;
-
+    reporter.report_info(&format!(
+        "Generating {} build files ...",
+        match config.build_system { BuildSystem::CMake => "CMakeLists.txt", BuildSystem::Zig => "build.zig" }
+    ));
     let empty_graph = DependencyGraph::new();
     let ref_graph = graph.as_ref().unwrap_or(&empty_graph);
-    generator.generate(&modules, ref_graph, true, &user_modules)?;
-    reporter.report_success("CMakeLists.txt files generated");
+    generate_build_files(&config, &modules, ref_graph, true, &user_modules)?;
+    reporter.report_success("Build files generated");
 
     // ── Scan presets & toolchain files ──
     let scanner = FffScanner::new(&root);
@@ -420,7 +320,10 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>) -> FbGenResult<()> {
     }
 
     // ── Device defines: switch presets to fb-gen's toolchain ────────
-    ensure_device_defines_preset(&mut config, &generator, &root, &reporter)?;
+    if config.build_system == BuildSystem::CMake {
+        let cmake_gen = CMakeGenerator::new(&config)?;
+        ensure_device_defines_preset(&mut config, &cmake_gen, &root, &reporter)?;
+    }
 
     // ── Cache ──
     save_meta_cache(&root, &modules, graph.as_ref(), &config)?;
@@ -568,7 +471,6 @@ fn save_sync_result(
         dependency_graph: dep_snapshot,
         file_checksums: prev_meta.file_checksums.clone(),
         last_sync: chrono::Utc::now().to_rfc3339(),
-        installed_packages_hash: prev_meta.installed_packages_hash.clone(),
     };
     cache.save(&meta)
 }
@@ -585,8 +487,15 @@ fn generate_compile_commands(
     config: &ProjectConfig,
     reporter: &Reporter,
 ) {
+    // Resolve the absolute build directory (config.output_dir may be relative).
+    let abs_build_dir = if build_dir.is_absolute() {
+        build_dir.to_path_buf()
+    } else {
+        root.join(build_dir)
+    };
+
     // Ensure build directory exists.
-    if let Err(e) = std::fs::create_dir_all(build_dir) {
+    if let Err(e) = std::fs::create_dir_all(&abs_build_dir) {
         reporter.report_warning(&format!(
             "Cannot create build dir for compile_commands.json: {e}"
         ));
@@ -598,7 +507,7 @@ fn generate_compile_commands(
     let toolchain_args = cmake_toolchain_args(config);
 
     let mut cmd = Command::new("cmake");
-    cmd.arg("-S").arg(root).arg("-B").arg(build_dir);
+    cmd.arg("-S").arg(root).arg("-B").arg(&abs_build_dir);
     for f in &gen_flags {
         cmd.arg(f);
     }
@@ -606,6 +515,7 @@ fn generate_compile_commands(
         cmd.arg(f);
     }
     cmd.arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
+    with_toolchain_path(&mut cmd, config);
 
     reporter.report_info(
         "Running cmake configure for compile_commands.json (--lsp) ..."
@@ -613,7 +523,7 @@ fn generate_compile_commands(
 
     match cmd.output() {
         Ok(output) if output.status.success() => {
-            let cc_json = build_dir.join("compile_commands.json");
+            let cc_json = abs_build_dir.join("compile_commands.json");
             if !cc_json.exists() {
                 reporter.report_warning(
                     "cmake succeeded but compile_commands.json was not produced."
@@ -648,15 +558,16 @@ fn generate_compile_commands(
 /// symlinks require elevated privileges, copy the file instead.
 fn symlink_or_copy(target: &Path, link: &Path) -> std::io::Result<()> {
     // Remove existing link / file if present.
-    if link.exists() {
-        // If it's already a symlink pointing to the right target, we're done.
-        if link.is_symlink() {
-            if let Ok(existing) = std::fs::read_link(link) {
-                if existing == target {
-                    return Ok(());
-                }
+    // NOTE: is_symlink() is checked first because Path::exists() returns
+    // false for dangling symlinks, so we'd skip the removal and hit EEXIST.
+    if link.is_symlink() {
+        if let Ok(existing) = std::fs::read_link(link) {
+            if existing == target {
+                return Ok(()); // already points to the right place
             }
         }
+        std::fs::remove_file(link)?;
+    } else if link.exists() {
         std::fs::remove_file(link)?;
     }
 
@@ -701,14 +612,8 @@ fn do_incremental_sync(
     let watcher = FileWatcher::new(root, config.exclude_dirs.clone());
     let changed_paths = watcher.get_changes(&prev_meta.file_checksums);
 
-    // ── Detect installed-package changes ──
-    let current_packages_hash = compute_installed_packages_hash(root);
-    let packages_changed = current_packages_hash != prev_meta.installed_packages_hash;
-    if packages_changed {
-        reporter.report_info("Installed packages changed — will regenerate.");
-    }
 
-    if changed_paths.is_empty() && !packages_changed {
+    if changed_paths.is_empty() {
         return Ok(0);
     }
     reporter.report_info(&format!("Detected {} changed file(s)", changed_paths.len()));
@@ -777,7 +682,7 @@ fn do_incremental_sync(
     // cause infinite redetection — if we remove them here and return early,
     // they come back from the on-disk cache next time.  Instead, defer the
     // removal to *after* the early-return guard.
-    if affected_modules.is_empty() && !module_list_changed && !packages_changed {
+    if affected_modules.is_empty() && !module_list_changed {
         // Still remove orphaned checksums for deleted files that are no
         // longer tracked by any module.  Without this, the same deletion
         // is reported on every subsequent sync.
@@ -804,11 +709,7 @@ fn do_incremental_sync(
             .remove(&dp.to_string_lossy().to_string());
     }
 
-    let n_affected = if packages_changed {
-        affected_modules.len().max(1)
-    } else {
-        affected_modules.len()
-    };
+    let n_affected = affected_modules.len();
     reporter.report_info(&format!("{} module(s) affected", n_affected));
 
     // ── 3. Re-analyze dependencies only if includes changed ──
@@ -823,18 +724,11 @@ fn do_incremental_sync(
         reporter.report_info("Dependencies unchanged — skipping re-analysis.");
     }
 
-    // ── 4. Inject installed SDK packages ──
-    let sdk_count = inject_installed_packages(&mut modules, reporter);
-    if sdk_count > 0 {
-        reporter.report_success(&format!("Injected {} installed SDK package(s)", sdk_count));
-    }
-
     // ── 5. Regenerate CMakeLists.txt ──
-    reporter.report_info("Regenerating affected CMakeLists.txt ...");
+    reporter.report_info("Regenerating affected build files ...");
     let user_modules = scanner.scan_user_cmake_files(root, &config.exclude_dirs);
     let user_modules = filter_overlapping_user_modules(user_modules, &modules, root, reporter);
-    let generator = CMakeGenerator::new(config)?;
-    generator.generate(&modules, &graph, true, &user_modules)?;
+    generate_build_files(config, &modules, &graph, true, &user_modules)?;
     reporter.report_success(&format!("{} module(s) updated", n_affected));
 
     // ── 6. Refresh presets & toolchain file list ──
@@ -842,7 +736,10 @@ fn do_incremental_sync(
     config.toolchain_files = scanner.scan_toolchain_files(root, &config.exclude_dirs)?;
 
     // ── 7. Device defines: ensure fb-gen's toolchain is active ──
-    ensure_device_defines_preset(config, &generator, root, reporter)?;
+    if config.build_system == BuildSystem::CMake {
+        let cmake_gen = CMakeGenerator::new(config)?;
+        ensure_device_defines_preset(config, &cmake_gen, root, reporter)?;
+    }
 
     // ── 8. Merge checksums and update prev_meta in place ──
     prev_meta.file_checksums.extend(new_checksums);
@@ -860,8 +757,6 @@ fn do_incremental_sync(
             })
             .collect(),
     };
-
-    prev_meta.installed_packages_hash = current_packages_hash;
 
     Ok(n_affected)
 }
@@ -1092,7 +987,6 @@ fn add_file_to_modules(
             compile_features: vec![],
             compile_definitions: vec![],
             include_dirs: vec![parent.to_path_buf()],
-            user_config: None,
         };
 
         if sf.source_type.is_source() {
@@ -1170,7 +1064,6 @@ fn rebuild_graph_from_snapshot(snap: &DependencySnapshot) -> DependencyGraph {
             from: from.clone(),
             to: to.clone(),
             dep_type: crate::models::dependency::DependencyType::Private,
-            reason: "cached".into(),
         });
     }
     graph
@@ -1216,15 +1109,12 @@ fn save_meta_cache(
         }
     };
 
-    let installed_packages_hash = compute_installed_packages_hash(root);
-
     let meta = ProjectMeta {
         config: config.clone(),
         modules: modules.to_vec(),
         dependency_graph: dep_snapshot,
         file_checksums: checksums,
         last_sync: chrono::Utc::now().to_rfc3339(),
-        installed_packages_hash,
     };
     cache.save(&meta)
 }
@@ -1270,10 +1160,9 @@ pub fn cmd_check(cli: &Cli) -> FbGenResult<()> {
         }
     }
 
-    let generator = CMakeGenerator::new(&tmp_config)?;
     let empty_graph = DependencyGraph::new();
     let ref_graph = graph.as_ref().unwrap_or(&empty_graph);
-    generator.generate(&modules, ref_graph, false, &user_modules)?;
+    generate_build_files(&tmp_config, &modules, ref_graph, false, &user_modules)?;
     let mut diffs = 0usize;
     // Root CMakeLists.txt
     let gen_root = tmp_root.join("CMakeLists.txt");
@@ -1426,18 +1315,11 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
     if !root_cmake.exists() {
         // First time: full generation.
         reporter.report_info("No CMakeLists.txt found — generating ...");
-        let (mut modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
+        let (modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
 
-        // ── Inject installed SDK packages ──
-        let sdk_count = inject_installed_packages(&mut modules, &reporter);
-        if sdk_count > 0 {
-            reporter.report_success(&format!("Injected {} installed SDK package(s)", sdk_count));
-        }
-
-        let generator = CMakeGenerator::new(&config)?;
         let empty_graph = DependencyGraph::new();
         let ref_graph = graph.as_ref().unwrap_or(&empty_graph);
-        generator.generate(&modules, ref_graph, true, &user_modules)?;
+        generate_build_files(&config, &modules, ref_graph, true, &user_modules)?;
         // Save cache for future incremental syncs.
         save_meta_cache(&root, &modules, graph.as_ref(), &config)?;
     } else if cache.exists() {
@@ -1457,7 +1339,6 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
                             dependency_graph: prev_meta.dependency_graph,
                             file_checksums: prev_meta.file_checksums,
                             last_sync: chrono::Utc::now().to_rfc3339(),
-                            installed_packages_hash: prev_meta.installed_packages_hash.clone(),
                         };
                         if let Err(e) = cache.save(&meta) {
                             reporter.report_warning(&format!(
@@ -1544,6 +1425,7 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
     if cli.lsp {
         cmd.arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
     }
+    with_toolchain_path(&mut cmd, &config);
     let (status, _cfg_lines) = run_cmake_formatted(&mut cmd, cli.quiet)
         .map_err(|e| FbGenError::Config(format!("cmake: {e}")))?;
 
@@ -1575,6 +1457,7 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
 
     let mut build_cmd = Command::new("cmake");
     build_cmd.arg("--build").arg(&build_dir);
+    with_toolchain_path(&mut build_cmd, &config);
     let (status, build_lines) = run_cmake_formatted(&mut build_cmd, cli.quiet)
         .map_err(|e| FbGenError::Config(format!("cmake --build: {e}")))?;
 
@@ -1929,6 +1812,62 @@ fn print_diff(label: &str, old: &str, new: &str) {
     }
 }
 
+/// Extend a `Command`'s `PATH` so the cross-compilation toolchain is
+/// discoverable.  No-op for native (x86) targets or when the toolchain
+/// directory can't be resolved.
+fn with_toolchain_path(cmd: &mut Command, config: &ProjectConfig) {
+    if config.toolchain.is_none() {
+        return;
+    }
+    // Try to locate the compiler binary from the sysroot.
+    let dirs = toolchain_bin_dirs(config);
+    if dirs.is_empty() {
+        return;
+    }
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut new_path = std::ffi::OsString::new();
+    for d in &dirs {
+        new_path.push(d);
+        new_path.push(":");
+    }
+    new_path.push(&current_path);
+    cmd.env("PATH", new_path);
+}
+
+/// Return candidate directories that contain the cross-compiler for the
+/// project's configured toolchain.
+fn toolchain_bin_dirs(config: &ProjectConfig) -> Vec<std::path::PathBuf> {
+    let tc = match config.toolchain.as_ref() {
+        Some(t) => t,
+        None => return vec![],
+    };
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    // Derive bin/ from sysroot (sysroot is typically at .../<arch>/bin/../<arch>
+    // or similar, so sysroot.parent() often points to the directory containing bin/).
+    if let Some(ref sysroot) = tc.sysroot {
+        let sysroot_path = std::path::Path::new(sysroot);
+        // Normalise: resolve ".." components.
+        if let Ok(canon) = sysroot_path.canonicalize() {
+            if let Some(parent) = canon.parent() {
+                let bin = parent.join("bin");
+                if bin.exists() {
+                    dirs.push(bin);
+                }
+            }
+        }
+        // Also try the raw path's parent.
+        if let Some(parent) = sysroot_path.parent() {
+            let bin = parent.join("bin");
+            if bin.exists() && !dirs.contains(&bin) {
+                dirs.push(bin);
+            }
+        }
+    }
+
+    dirs
+}
+
 /// Map BuildBackend to cmake -G argument(s).
 fn cmake_generator_flag(config: &ProjectConfig) -> Vec<String> {
     match config.build_backend {
@@ -1969,6 +1908,26 @@ fn cmake_toolchain_args(config: &ProjectConfig) -> Vec<String> {
     }
 }
 
+/// Dispatch generate to CMake or Zig based on `config.build_system`.
+fn generate_build_files(
+    config: &ProjectConfig,
+    modules: &[CMakeModule],
+    graph: &DependencyGraph,
+    force: bool,
+    user_modules: &[PathBuf],
+) -> FbGenResult<()> {
+    match config.build_system {
+        BuildSystem::CMake => {
+            let generator = CMakeGenerator::new(config)?;
+            generator.generate(modules, graph, force, user_modules)
+        }
+        BuildSystem::Zig => {
+            let generator = ZigGenerator::new(config)?;
+            generator.generate(modules, graph, force, user_modules)
+        }
+    }
+}
+
 /// Load config from cache, or return a default (for validate).
 fn load_or_default_config(root: &Path, output_dir: &Path) -> ProjectConfig {
     MetaCache::new(root)
@@ -1987,247 +1946,7 @@ fn load_or_default_config(root: &Path, output_dir: &Path) -> ProjectConfig {
         })
 }
 
-/// `fb-gen install` — download and configure toolchains, SDKs, or middleware.
-pub fn cmd_install(
-    cli: &Cli,
-    kind: Option<&str>,
-    arch: Option<&str>,
-    list: bool,
-    list_installed: bool,
-    dry_run: bool,
-    uninstall: Option<&str>,
-    upgrade: Option<&str>,
-) -> FbGenResult<()> {
-    let reporter = Reporter::new(cli.quiet);
-    let root = resolve_root(cli)?;
-
-    // ── --upgrade: upgrade a package ──
-    if let Some(pkg_id) = upgrade {
-        install::upgrade_package(pkg_id)?;
-        crate::install::bridge::write_installed_packages_marker(&root);
-        return Ok(());
-    }
-
-    // ── --uninstall: remove a package ──
-    if let Some(pkg_id) = uninstall {
-        install::uninstall_package(pkg_id)?;
-        crate::install::bridge::write_installed_packages_marker(&root);
-        return Ok(());
-    }
-
-    // ── --list: show available packages ──
-    if list {
-        println!("  Available packages (hard-coded):");
-        println!();
-        for pkg in install::catalogue::CATALOGUE {
-            // Filter by kind if specified.
-            if let Some(ref k) = kind {
-                let kind_str = pkg.kind.as_str();
-                if !kind_str.eq_ignore_ascii_case(k) {
-                    continue;
-                }
-            }
-            let arch_str = pkg
-                .arch
-                .as_ref()
-                .map(|a| format!("{:?}", a))
-                .unwrap_or_else(|| "\u{2014}".into());
-            println!(
-                "  {:30} {:15} v{}  ({})",
-                pkg.id, arch_str, pkg.version, pkg.name
-            );
-        }
-
-        // Also fetch and list remote packages.
-        if let Some(remote_pkgs) = install::manifest::fetch_manifest(None) {
-            println!();
-            println!("  Available packages (remote):");
-            println!();
-            for rp in &remote_pkgs {
-                // Filter by kind if specified (remote packages are always Toolchain for now).
-                if let Some(ref k) = kind {
-                    if !"toolchain".eq_ignore_ascii_case(k) {
-                        continue;
-                    }
-                }
-                let arch_str = rp
-                    .arch
-                    .as_deref()
-                    .unwrap_or("\u{2014}");
-                println!(
-                    "  {:30} {:15} v{}  ({})",
-                    rp.id, arch_str, rp.version, rp.name
-                );
-            }
-        }
-
-        println!();
-        return Ok(());
-    }
-
-    // ── --list-installed: show installed packages ──
-    if list_installed {
-        let root = install::resolve_install_root();
-
-        let records = install::environment::read_installed_records(&root);
-
-        if records.is_empty() {
-            println!("  No packages installed yet.");
-            return Ok(());
-        }
-
-        println!("  Installed packages:");
-        println!();
-
-        let mut records = records;
-        // Sort by id then version.
-        records.sort_by(|a, b| {
-            a.id
-                .cmp(&b.id)
-                .then_with(|| a.version.cmp(&b.version))
-        });
-
-        for record in &records {
-            // Check if this is the current version.
-            let current_link = root
-                .join("toolchains")
-                .join(&record.id)
-                .join("current");
-            let is_current =
-                std::fs::read_link(&current_link).map_or(false, |target| {
-                    target.to_string_lossy().ends_with(&record.version)
-                });
-
-            let marker = if is_current { " *" } else { "  " };
-            println!(
-                "  {}{:30} v{:<20} {}",
-                marker, record.id, record.version, record.installed_at
-            );
-        }
-        println!();
-        if records.iter().any(|r| {
-            let link = root.join("toolchains").join(&r.id).join("current");
-            std::fs::read_link(&link).is_ok()
-        }) {
-            println!("  (* = active version via 'current' symlink)");
-            println!();
-        }
-        return Ok(());
-    }
-
-    // ── Resolve package to install ──
-    let arch_filter = arch.unwrap_or("");
-    let kind_filter = kind.map(|k| k.to_lowercase());
-    let pkg = install::catalogue::CATALOGUE
-        .iter()
-        .find(|p| {
-            // Filter by arch.
-            let arch_match = if arch_filter.is_empty() {
-                true  // no filter → match everything
-            } else if let Some(ref a) = p.arch {
-                format!("{:?}", a)
-                    .to_lowercase()
-                    .contains(&arch_filter.to_lowercase())
-            } else {
-                false
-            };
-            // Filter by kind if specified.
-            let kind_match = if let Some(ref kf) = kind_filter {
-                let kind_str = p.kind.as_str();
-                kind_str.contains(kf)
-            } else {
-                true
-            };
-            arch_match && kind_match
-        });
-
-    // If not found in hard-coded catalogue, try remote manifest.
-    let pkg: &install::catalogue::Package = if let Some(found) = pkg {
-        found
-    } else {
-        match install::manifest::fetch_manifest(None) {
-            Some(remote_pkgs) => {
-                let remote_match = remote_pkgs.iter().find(|rp| {
-                    let arch_match = arch_filter.is_empty()
-                        || rp.arch.as_deref()
-                            .map(|a| a.to_lowercase().contains(&arch_filter.to_lowercase()))
-                            .unwrap_or(false);
-                    let kind_match = kind_filter
-                        .as_ref()
-                        .map(|kf| {
-                            // Remote packages are toolchains by default in Phase 2.
-                            "toolchain".contains(kf.as_str())
-                        })
-                        .unwrap_or(true);
-                    arch_match && kind_match
-                });
-                match remote_match {
-                    Some(rp) => {
-                        // Leak the remote package into a static Package for the installer.
-                        // This is a one-shot CLI command — leaked memory is reclaimed on exit.
-                        let leaked: &install::catalogue::Package =
-                            Box::leak(Box::new(install::manifest::remote_to_package(rp)));
-                        leaked
-                    }
-                    None => {
-                        return Err(FbGenError::Config(format!(
-                            "No package found for arch '{}'{}. Run `fb-gen install --list`.",
-                            arch_filter,
-                            kind_filter
-                                .map(|k| format!(" kind '{}'", k))
-                                .unwrap_or_default()
-                        )));
-                    }
-                }
-            }
-            None => {
-                return Err(FbGenError::Config(format!(
-                    "No package found for arch '{}'{} and remote manifest unavailable. \
-                     Run `fb-gen install --list`.",
-                    arch_filter,
-                    kind_filter
-                        .map(|k| format!(" kind '{}'", k))
-                        .unwrap_or_default()
-                )));
-            }
-        }
-    };
-
-    reporter.report_info(&format!(
-        "Installing {} v{} ...",
-        pkg.name, pkg.version
-    ));
-
-    if dry_run {
-        let dl = pkg.downloads.for_current_platform().ok_or_else(|| {
-            FbGenError::Config("No download for current platform".into())
-        })?;
-        println!("  Would download from: {}", dl.url);
-        println!(
-            "  Would install to:    ~/.fb-gen/toolchains/{}/{}",
-            pkg.id, pkg.version
-        );
-        println!(
-            "  Platform:            {} {}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        );
-        return Ok(());
-    }
-
-    // ── Execute install ──
-    install::install_package(pkg)?;
-
-    crate::install::bridge::write_installed_packages_marker(&root);
-
-    reporter.report_success(&format!("Installed {} v{}", pkg.id, pkg.version));
-    println!();
-    println!("  To activate, run: source ~/.fb-gen/env");
-    println!("  Or add to your shell profile: . ~/.fb-gen/env");
-
-    Ok(())
-}
-
+// ── tests ──────────────────────────────────────────────────────────────────
 // ── tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2326,36 +2045,5 @@ mod cmake_format_tests {
     #[test]
     fn empty_line_unchanged() {
         assert_eq!(format_colored(""), "");
-    }
-}
-
-#[cfg(test)]
-mod install_tests {
-    use super::*;
-
-    #[test]
-    fn test_cmd_install_list_does_not_crash() {
-        let cli = Cli {
-            root: PathBuf::from("."),
-            exclude: vec![],
-            lang: "C".into(),
-            no_deps: false,
-            output: PathBuf::from("build"),
-            watch: false,
-            lsp: false,
-            verbose: 0,
-            quiet: true,
-            command: crate::cli::Commands::Install {
-                kind: None,
-                arch: None,
-                list: true,
-                list_installed: false,
-                dry_run: false,
-                uninstall: None,
-                upgrade: None,
-            },
-        };
-        // cmd_install with --list should not crash.
-        crate::cli::run(cli);
     }
 }
