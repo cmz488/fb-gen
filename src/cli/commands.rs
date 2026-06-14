@@ -1473,9 +1473,14 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
                 .map_err(|e| FbGenError::Config(format!("cmake --build: {e}")))?
         }
         BuildSystem::Zig => {
-            reporter.report_info("Building with zig build ...");
+            reporter.report_info(&format!(
+                "Building with zig build --prefix {} ...",
+                build_dir.display()
+            ));
             let mut build_cmd = Command::new("zig");
-            build_cmd.arg("build").current_dir(&root);
+            build_cmd.arg("build")
+                .arg("-p").arg(&build_dir)
+                .current_dir(&root);
             let (s, lines) = run_cmake_formatted(&mut build_cmd, cli.quiet)
                 .map_err(|e| FbGenError::Config(format!("zig build: {e}")))?;
             (s, lines)
@@ -1960,6 +1965,7 @@ fn generate_compile_commands_zig(
 ) {
     reporter.report_info("Generating compile_commands.json from module metadata ...");
 
+    let root_str = root.to_string_lossy().to_string();
     let module_map: std::collections::HashMap<&str, &CMakeModule> =
         modules.iter().map(|m| (m.name.as_str(), m)).collect();
     let mut entries: Vec<serde_json::Value> = Vec::new();
@@ -1968,25 +1974,34 @@ fn generate_compile_commands_zig(
         let mut seen_dirs = std::collections::HashSet::new();
         let mut inc_flags = String::new();
 
-        let mut add_dir = |d: &str| {
-            if !d.is_empty() && !d.contains(".zig-cache") && seen_dirs.insert(d.to_string()) {
+        let mut add_dir = |p: &Path| {
+            let d = if p.is_absolute() {
+                p.to_string_lossy().to_string()
+            } else {
+                root.join(p).to_string_lossy().to_string()
+            };
+            if !d.is_empty() && !d.contains(".zig-cache") && seen_dirs.insert(d.clone()) {
                 inc_flags.push_str(&format!(" -I {}", d));
             }
         };
 
-        // Own module path.
-        add_dir(&m.relative_path.to_string_lossy());
+        // Own module path (absolute).
+        if !m.relative_path.as_os_str().is_empty() {
+            add_dir(&root.join(&m.relative_path));
+        }
         // Explicit include dirs.
         for inc in &m.include_dirs {
-            add_dir(&inc.to_string_lossy());
+            add_dir(inc);
         }
-        // Dependency include paths from the graph.
+        // Dependency include paths.
         if let Some(g) = graph {
             for (dep_name, _) in &g.get_dependencies(&m.name) {
                 if let Some(dep) = module_map.get(dep_name.as_str()) {
-                    add_dir(&dep.relative_path.to_string_lossy());
+                    if !dep.relative_path.as_os_str().is_empty() {
+                        add_dir(&root.join(&dep.relative_path));
+                    }
                     for inc in &dep.include_dirs {
-                        add_dir(&inc.to_string_lossy());
+                        add_dir(inc);
                     }
                 }
             }
@@ -2007,7 +2022,7 @@ fn generate_compile_commands_zig(
                 src.relative_path.to_string_lossy(),
             );
             entries.push(serde_json::json!({
-                "directory": root.to_string_lossy(),
+                "directory": root_str,
                 "file": src.path.to_string_lossy(),
                 "command": cmd,
             }));
