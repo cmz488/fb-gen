@@ -347,7 +347,7 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>, build: Option<&str>) -> FbGenResu
 
     // ── LSP ──────────────────────────────────────────────────────────
     if cli.lsp {
-        generate_compile_commands(&root, &config.output_dir, &config, &modules, &reporter);
+        generate_compile_commands(&root, &config.output_dir, &config, &modules, graph.as_ref(), &reporter);
     }
 
     Ok(())
@@ -394,7 +394,7 @@ pub fn cmd_sync(cli: &Cli) -> FbGenResult<()> {
 
     // ── LSP ──────────────────────────────────────────────────────────
     if cli.lsp {
-        generate_compile_commands(&root, &config.output_dir, &config, &prev_meta.modules, &reporter);
+        generate_compile_commands(&root, &config.output_dir, &config, &prev_meta.modules, None, &reporter);
     }
 
     // ── Watch loop ──────────────────────────────────────────────────────
@@ -490,10 +490,11 @@ fn generate_compile_commands(
     build_dir: &Path,
     config: &ProjectConfig,
     modules: &[CMakeModule],
+    graph: Option<&DependencyGraph>,
     reporter: &Reporter,
 ) {
     if config.build_system == BuildSystem::Zig {
-        generate_compile_commands_zig(root, modules, reporter);
+        generate_compile_commands_zig(root, modules, graph, reporter);
         return;
     }
 
@@ -1954,29 +1955,43 @@ fn generate_build_files(
 fn generate_compile_commands_zig(
     root: &Path,
     modules: &[CMakeModule],
+    graph: Option<&DependencyGraph>,
     reporter: &Reporter,
 ) {
     reporter.report_info("Generating compile_commands.json from module metadata ...");
 
+    let module_map: std::collections::HashMap<&str, &CMakeModule> =
+        modules.iter().map(|m| (m.name.as_str(), m)).collect();
     let mut entries: Vec<serde_json::Value> = Vec::new();
-    let mut seen_dirs = std::collections::HashSet::new();
 
     for m in modules {
-        // Collect -I flags as a single string (deduped, skipping empty / zig-cache).
-        seen_dirs.clear();
+        let mut seen_dirs = std::collections::HashSet::new();
         let mut inc_flags = String::new();
-        let own_dir = m.relative_path.to_string_lossy().to_string();
-        if !own_dir.is_empty() && !own_dir.contains(".zig-cache") && seen_dirs.insert(own_dir.clone()) {
-            inc_flags.push_str(&format!(" -I {}", own_dir));
-        }
-        for inc in &m.include_dirs {
-            let d = inc.to_string_lossy().to_string();
-            if !d.is_empty() && !d.contains(".zig-cache") && seen_dirs.insert(d.clone()) {
+
+        let mut add_dir = |d: &str| {
+            if !d.is_empty() && !d.contains(".zig-cache") && seen_dirs.insert(d.to_string()) {
                 inc_flags.push_str(&format!(" -I {}", d));
+            }
+        };
+
+        // Own module path.
+        add_dir(&m.relative_path.to_string_lossy());
+        // Explicit include dirs.
+        for inc in &m.include_dirs {
+            add_dir(&inc.to_string_lossy());
+        }
+        // Dependency include paths from the graph.
+        if let Some(g) = graph {
+            for (dep_name, _) in &g.get_dependencies(&m.name) {
+                if let Some(dep) = module_map.get(dep_name.as_str()) {
+                    add_dir(&dep.relative_path.to_string_lossy());
+                    for inc in &dep.include_dirs {
+                        add_dir(&inc.to_string_lossy());
+                    }
+                }
             }
         }
 
-        // Collect -D flags
         let mut def_flags = String::new();
         for def in &m.compile_definitions {
             def_flags.push_str(&format!(" -D {}", def));
@@ -1986,21 +2001,15 @@ fn generate_compile_commands_zig(
             if !src.source_type.is_source() {
                 continue;
             }
-            let file_path = src.path.to_string_lossy().to_string();
-            let file_rel = src.relative_path.to_string_lossy().to_string();
-
-            let command = format!(
-                "zig cc{} {} -c {} -o {}",
-                inc_flags,
-                def_flags,
-                file_rel,
-                file_rel.replace('/', "_").replace(".cpp", ".o").replace(".c", ".o"),
+            let cmd = format!(
+                "zig cc{}{} -c {}",
+                inc_flags, def_flags,
+                src.relative_path.to_string_lossy(),
             );
-
             entries.push(serde_json::json!({
                 "directory": root.to_string_lossy(),
-                "file": file_path,
-                "command": command,
+                "file": src.path.to_string_lossy(),
+                "command": cmd,
             }));
         }
     }
