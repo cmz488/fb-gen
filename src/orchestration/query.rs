@@ -33,7 +33,7 @@ pub struct UserQuery;
 impl UserQuery {
     /// Walk the user through all project-configuration questions and
     /// return a populated `ProjectConfig`.
-    pub fn ask_project_config(root: &PathBuf) -> FbGenResult<ProjectConfig> {
+    pub fn ask_project_config(root: &PathBuf, build_hint: Option<&str>) -> FbGenResult<ProjectConfig> {
         println!();
         println!("  Welcome to fb-gen — Fast Build Generate");
         println!("  Let's set up your project configuration.");
@@ -80,16 +80,30 @@ impl UserQuery {
         };
 
         // ── build system ───────────────────────────────────────────
-        println!();
-        println!("  Build system:");
-        println!("    1) CMake  (default)");
-        println!("    2) Zig    (single binary, built-in cross-compilation)");
-        let bs_choice = prompt_with_default("Choose build system [1-2]", "1").map_err(|e| {
-            crate::models::FbGenError::Config(format!("failed to read build system: {e}"))
-        })?;
-        let build_system = match bs_choice.as_str() {
-            "2" => crate::models::project::BuildSystem::Zig,
-            _ => crate::models::project::BuildSystem::CMake,
+        let build_system = match build_hint {
+            Some("zig") => {
+                println!();
+                println!("  Build system: Zig (from --build flag)");
+                crate::models::project::BuildSystem::Zig
+            }
+            Some("cmake") => {
+                println!();
+                println!("  Build system: CMake (from --build flag)");
+                crate::models::project::BuildSystem::CMake
+            }
+            _ => {
+                println!();
+                println!("  Build system:");
+                println!("    1) CMake  (default)");
+                println!("    2) Zig    (single binary, built-in cross-compilation)");
+                let bs_choice = prompt_with_default("Choose build system [1-2]", "1").map_err(|e| {
+                    crate::models::FbGenError::Config(format!("failed to read build system: {e}"))
+                })?;
+                match bs_choice.as_str() {
+                    "2" => crate::models::project::BuildSystem::Zig,
+                    _ => crate::models::project::BuildSystem::CMake,
+                }
+            }
         };
         let is_zig = build_system == crate::models::project::BuildSystem::Zig;
 

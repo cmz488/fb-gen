@@ -273,19 +273,11 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>, build: Option<&str>) -> FbGenResu
         cli.root.clone()
     };
 
-    let mut config = UserQuery::ask_project_config(&root)?;
+    let mut config = UserQuery::ask_project_config(&root, build)?;
 
     // Override project name if given on the command line.
     if let Some(n) = name {
         config.name = n.to_string();
-    }
-
-    // Override build system if given on the command line.
-    match build {
-        Some("zig") => config.build_system = BuildSystem::Zig,
-        Some("cmake") => config.build_system = BuildSystem::CMake,
-        Some(other) => reporter.report_warning(&format!("Unknown build system '{}', using default", other)),
-        None => {}
     }
 
     // Override from CLI flags.
@@ -1181,24 +1173,31 @@ pub fn cmd_check(cli: &Cli) -> FbGenResult<()> {
     let ref_graph = graph.as_ref().unwrap_or(&empty_graph);
     generate_build_files(&tmp_config, &modules, ref_graph, false, &user_modules)?;
     let mut diffs = 0usize;
-    // Root CMakeLists.txt
-    let gen_root = tmp_root.join("CMakeLists.txt");
-    let real_root = root.join("CMakeLists.txt");
-    diffs += diff_file(&gen_root, &real_root, "CMakeLists.txt (root)", &reporter);
 
-    // Per-module CMakeLists.txt
-    for m in &modules {
-        if m.is_root {
-            continue;
+    if config.build_system == BuildSystem::Zig {
+        let gen = tmp_root.join("build.zig");
+        let real = root.join("build.zig");
+        diffs += diff_file(&gen, &real, "build.zig", &reporter);
+    } else {
+        // Root CMakeLists.txt
+        let gen_root = tmp_root.join("CMakeLists.txt");
+        let real_root = root.join("CMakeLists.txt");
+        diffs += diff_file(&gen_root, &real_root, "CMakeLists.txt (root)", &reporter);
+
+        // Per-module CMakeLists.txt
+        for m in &modules {
+            if m.is_root {
+                continue;
+            }
+            let gen = tmp_root.join(&m.relative_path).join("CMakeLists.txt");
+            let real = root.join(&m.relative_path).join("CMakeLists.txt");
+            let label = format!("CMakeLists.txt ({})", m.name);
+            diffs += diff_file(&gen, &real, &label, &reporter);
         }
-        let gen = tmp_root.join(&m.relative_path).join("CMakeLists.txt");
-        let real = root.join(&m.relative_path).join("CMakeLists.txt");
-        let label = format!("CMakeLists.txt ({})", m.name);
-        diffs += diff_file(&gen, &real, &label, &reporter);
     }
 
     if diffs == 0 {
-        reporter.report_success("All CMakeLists.txt files are in sync with project structure.");
+        reporter.report_success("All build files are in sync with project structure.");
     } else {
         reporter.report_warning(&format!("{} file(s) differ from generated output.", diffs));
     }
@@ -1215,6 +1214,12 @@ pub fn cmd_validate(cli: &Cli) -> FbGenResult<()> {
     std::fs::create_dir_all(&build_dir).map_err(FbGenError::Io)?;
 
     let config = load_or_default_config(&root, &cli.output);
+
+    if config.build_system == BuildSystem::Zig {
+        reporter.report_info("Zig projects are validated by `zig build` — skipping cmake.");
+        return Ok(());
+    }
+
     let gen_flags = cmake_generator_flag(&config);
     let toolchain_args = cmake_toolchain_args(&config);
 
@@ -1327,11 +1332,14 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
 
     let gen_flags = cmake_generator_flag(&config);
 
-    // Ensure CMakeLists.txt are up to date.
-    let root_cmake = root.join("CMakeLists.txt");
-    if !root_cmake.exists() {
+    // Ensure build files are up to date.
+    let build_file = match config.build_system {
+        BuildSystem::CMake => root.join("CMakeLists.txt"),
+        BuildSystem::Zig => root.join("build.zig"),
+    };
+    if !build_file.exists() {
         // First time: full generation.
-        reporter.report_info("No CMakeLists.txt found — generating ...");
+        reporter.report_info(&format!("No {} found — generating ...", build_file.file_name().unwrap_or_default().to_string_lossy()));
         let (modules, graph, user_modules) = scan_and_discover(cli, &config, &reporter)?;
 
         let empty_graph = DependencyGraph::new();
@@ -1482,6 +1490,9 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
             build_cmd.arg("build").current_dir(&root);
             let (s, lines) = run_cmake_formatted(&mut build_cmd, cli.quiet)
                 .map_err(|e| FbGenError::Config(format!("zig build: {e}")))?;
+            if cli.lsp {
+                generate_compile_commands_zig(&root, &reporter);
+            }
             (s, lines)
         }
     };
@@ -1980,10 +1991,10 @@ fn generate_compile_commands_zig(root: &Path, reporter: &Reporter) {
         return;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stderr);
+    let verbose_output = String::from_utf8_lossy(&output.stderr);
     let mut entries: Vec<serde_json::Value> = Vec::new();
 
-    for line in stdout.lines() {
+    for line in verbose_output.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with("install") {
             continue;
@@ -2002,24 +2013,22 @@ fn generate_compile_commands_zig(root: &Path, reporter: &Reporter) {
         }
 
         let source_file = parts[2].to_string();
-
-        // Collect -I directories
-        let mut includes: Vec<String> = Vec::new();
-        let mut i = 3;
+        // Filter out zig-internal flags AND their following values.
+        let mut i: usize = 0;
+        let mut command_parts: Vec<&str> = Vec::new();
         while i < parts.len() {
-            if parts[i] == "-I" && i + 1 < parts.len() {
-                includes.push(parts[i + 1].to_string());
-                i += 2;
+            let p = parts[i];
+            if p.starts_with("--listen") || p.starts_with("--cache-dir")
+                || p.starts_with("--global-cache-dir") || p.starts_with("--zig-lib-dir")
+            {
+                i += 2; // skip flag + value
+            } else if p.starts_with("-Mroot") {
+                i += 1;
             } else {
+                command_parts.push(p);
                 i += 1;
             }
         }
-
-        let command_parts: Vec<&str> = parts.iter().copied()
-            .filter(|p| !p.starts_with("--listen") && !p.starts_with("--cache-dir")
-                    && !p.starts_with("--global-cache-dir") && !p.starts_with("--zig-lib-dir")
-                    && !p.starts_with("-Mroot"))
-            .collect();
 
         entries.push(serde_json::json!({
             "directory": root.to_string_lossy(),
