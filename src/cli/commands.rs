@@ -1962,49 +1962,45 @@ fn generate_compile_commands_zig(
     let mut seen_dirs = std::collections::HashSet::new();
 
     for m in modules {
-        // Collect include dirs: module path + explicit include_dirs (deduped)
-        let mut include_args: Vec<String> = Vec::new();
+        // Collect -I flags as a single string (deduped, skipping empty / zig-cache).
         seen_dirs.clear();
+        let mut inc_flags = String::new();
         let own_dir = m.relative_path.to_string_lossy().to_string();
-        if seen_dirs.insert(own_dir.clone()) {
-            include_args.push("-I".to_string());
-            include_args.push(own_dir);
+        if !own_dir.is_empty() && !own_dir.contains(".zig-cache") && seen_dirs.insert(own_dir.clone()) {
+            inc_flags.push_str(&format!(" -I {}", own_dir));
         }
         for inc in &m.include_dirs {
             let d = inc.to_string_lossy().to_string();
-            if !d.is_empty() && !d.contains(".zig-cache") && seen_dirs.insert(d) {
-                include_args.push("-I".to_string());
-                include_args.push(inc.to_string_lossy().to_string());
+            if !d.is_empty() && !d.contains(".zig-cache") && seen_dirs.insert(d.clone()) {
+                inc_flags.push_str(&format!(" -I {}", d));
             }
         }
 
-        // Compile definitions: -D FOO -D BAR=baz
-        let mut define_args: Vec<String> = Vec::new();
+        // Collect -D flags
+        let mut def_flags = String::new();
         for def in &m.compile_definitions {
-            define_args.push("-D".to_string());
-            define_args.push(def.clone());
+            def_flags.push_str(&format!(" -D {}", def));
         }
 
         for src in &m.sources {
             if !src.source_type.is_source() {
                 continue;
             }
-
             let file_path = src.path.to_string_lossy().to_string();
             let file_rel = src.relative_path.to_string_lossy().to_string();
 
-            let mut args: Vec<String> = vec!["zig".to_string(), "cc".to_string()];
-            args.extend(include_args.clone());
-            args.extend(define_args.clone());
-            args.push("-c".to_string());
-            args.push(file_rel.clone());
-            args.push("-o".to_string());
-            args.push(file_rel.replace('/', "_").replace(".cpp", ".o").replace(".c", ".o"));
+            let command = format!(
+                "zig cc{} {} -c {} -o {}",
+                inc_flags,
+                def_flags,
+                file_rel,
+                file_rel.replace('/', "_").replace(".cpp", ".o").replace(".c", ".o"),
+            );
 
             entries.push(serde_json::json!({
                 "directory": root.to_string_lossy(),
                 "file": file_path,
-                "arguments": args,
+                "command": command,
             }));
         }
     }
