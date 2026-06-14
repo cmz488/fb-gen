@@ -347,7 +347,7 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>, build: Option<&str>) -> FbGenResu
 
     // ── LSP ──────────────────────────────────────────────────────────
     if cli.lsp {
-        generate_compile_commands(&root, &config.output_dir, &config, &reporter);
+        generate_compile_commands(&root, &config.output_dir, &config, &modules, &reporter);
     }
 
     Ok(())
@@ -394,7 +394,7 @@ pub fn cmd_sync(cli: &Cli) -> FbGenResult<()> {
 
     // ── LSP ──────────────────────────────────────────────────────────
     if cli.lsp {
-        generate_compile_commands(&root, &config.output_dir, &config, &reporter);
+        generate_compile_commands(&root, &config.output_dir, &config, &prev_meta.modules, &reporter);
     }
 
     // ── Watch loop ──────────────────────────────────────────────────────
@@ -489,10 +489,11 @@ fn generate_compile_commands(
     root: &Path,
     build_dir: &Path,
     config: &ProjectConfig,
+    modules: &[CMakeModule],
     reporter: &Reporter,
 ) {
     if config.build_system == BuildSystem::Zig {
-        generate_compile_commands_zig(root, reporter);
+        generate_compile_commands_zig(root, modules, reporter);
         return;
     }
 
@@ -1450,9 +1451,6 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
             for f in &toolchain_args {
                 cmd.arg(f);
             }
-            if cli.lsp {
-                cmd.arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
-            }
             with_toolchain_path(&mut cmd, &config);
             let (s, _cfg_lines) = run_cmake_formatted(&mut cmd, cli.quiet)
                 .map_err(|e| FbGenError::Config(format!("cmake: {e}")))?;
@@ -1461,17 +1459,6 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
             }
 
             // ── LSP symlink ──────────────────────────────────────────
-            if cli.lsp {
-                let cc_json = build_dir.join("compile_commands.json");
-                if cc_json.exists() {
-                    match symlink_or_copy(&cc_json, &root.join("compile_commands.json")) {
-                        Ok(()) => reporter.report_success("compile_commands.json -> project root"),
-                        Err(e) => reporter.report_warning(&format!(
-                            "compile_commands.json symlink failed: {e}"
-                        )),
-                    }
-                }
-            }
 
             // Build.
             reporter.report_info(&format!(
@@ -1490,9 +1477,6 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
             build_cmd.arg("build").current_dir(&root);
             let (s, lines) = run_cmake_formatted(&mut build_cmd, cli.quiet)
                 .map_err(|e| FbGenError::Config(format!("zig build: {e}")))?;
-            if cli.lsp {
-                generate_compile_commands_zig(&root, &reporter);
-            }
             (s, lines)
         }
     };
@@ -1964,78 +1948,65 @@ fn generate_build_files(
     }
 }
 
-/// Generate `compile_commands.json` for a Zig project by parsing
-/// `zig build --verbose` output.
-fn generate_compile_commands_zig(root: &Path, reporter: &Reporter) {
-    reporter.report_info("Generating compile_commands.json via zig build --verbose ...");
+/// Generate `compile_commands.json` for a Zig project using the project's
+/// own module metadata (source files, include dirs, compile definitions).
+/// Produces clang-compatible `zig cc` commands that clangd can parse.
+fn generate_compile_commands_zig(
+    root: &Path,
+    modules: &[CMakeModule],
+    reporter: &Reporter,
+) {
+    reporter.report_info("Generating compile_commands.json from module metadata ...");
 
-    // Remove cache so zig rebuilds and outputs compile commands.
-    let cache_dir = root.join(".zig-cache");
-    let _ = std::fs::remove_dir_all(&cache_dir);
-
-    let output = match std::process::Command::new("zig")
-        .arg("build")
-        .arg("--verbose")
-        .current_dir(root)
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            reporter.report_warning(&format!("Failed to run zig build --verbose: {e}"));
-            return;
-        }
-    };
-
-    if !output.status.success() {
-        reporter.report_warning("zig build --verbose failed; compile_commands.json not generated.");
-        return;
-    }
-
-    let verbose_output = String::from_utf8_lossy(&output.stderr);
     let mut entries: Vec<serde_json::Value> = Vec::new();
+    let mut seen_dirs = std::collections::HashSet::new();
 
-    for line in verbose_output.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("install") {
-            continue;
+    for m in modules {
+        // Collect include dirs: module path + explicit include_dirs (deduped)
+        let mut include_args: Vec<String> = Vec::new();
+        seen_dirs.clear();
+        let own_dir = m.relative_path.to_string_lossy().to_string();
+        if seen_dirs.insert(own_dir.clone()) {
+            include_args.push("-I".to_string());
+            include_args.push(own_dir);
         }
-
-        // Parse: /usr/bin/zig build-exe /path/to/src.cpp ... -I /path ...
-        // or:    /usr/bin/zig build-lib /path/to/lib.cpp ... -I /path ...
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
-            continue;
-        }
-
-        let is_build = parts.get(1).map_or(false, |s| *s == "build-exe" || *s == "build-lib");
-        if !is_build || parts.len() < 3 {
-            continue;
-        }
-
-        let source_file = parts[2].to_string();
-        // Filter out zig-internal flags AND their following values.
-        let mut i: usize = 0;
-        let mut command_parts: Vec<&str> = Vec::new();
-        while i < parts.len() {
-            let p = parts[i];
-            if p.starts_with("--listen") || p.starts_with("--cache-dir")
-                || p.starts_with("--global-cache-dir") || p.starts_with("--zig-lib-dir")
-            {
-                i += 2; // skip flag + value
-            } else if p.starts_with("-Mroot") {
-                i += 1;
-            } else {
-                command_parts.push(p);
-                i += 1;
+        for inc in &m.include_dirs {
+            let d = inc.to_string_lossy().to_string();
+            if !d.is_empty() && !d.contains(".zig-cache") && seen_dirs.insert(d) {
+                include_args.push("-I".to_string());
+                include_args.push(inc.to_string_lossy().to_string());
             }
         }
 
-        entries.push(serde_json::json!({
-            "directory": root.to_string_lossy(),
-            "file": source_file,
-            "arguments": command_parts,
-            "output": format!("zig-out/{}", source_file.replace('/', "_").replace(".cpp", ".o").replace(".c", ".o")),
-        }));
+        // Compile definitions: -D FOO -D BAR=baz
+        let mut define_args: Vec<String> = Vec::new();
+        for def in &m.compile_definitions {
+            define_args.push("-D".to_string());
+            define_args.push(def.clone());
+        }
+
+        for src in &m.sources {
+            if !src.source_type.is_source() {
+                continue;
+            }
+
+            let file_path = src.path.to_string_lossy().to_string();
+            let file_rel = src.relative_path.to_string_lossy().to_string();
+
+            let mut args: Vec<String> = vec!["zig".to_string(), "cc".to_string()];
+            args.extend(include_args.clone());
+            args.extend(define_args.clone());
+            args.push("-c".to_string());
+            args.push(file_rel.clone());
+            args.push("-o".to_string());
+            args.push(file_rel.replace('/', "_").replace(".cpp", ".o").replace(".c", ".o"));
+
+            entries.push(serde_json::json!({
+                "directory": root.to_string_lossy(),
+                "file": file_path,
+                "arguments": args,
+            }));
+        }
     }
 
     let cc_json = serde_json::json!(entries);
@@ -2056,7 +2027,6 @@ fn generate_compile_commands_zig(root: &Path, reporter: &Reporter) {
         }
     }
 }
-
 /// Load config from cache, or return a default (for validate).
 fn load_or_default_config(root: &Path, output_dir: &Path) -> ProjectConfig {
     MetaCache::new(root)
