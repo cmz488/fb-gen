@@ -6,5 +6,5 @@ design.md
 .codegraph/
 
 
-/build/
-/log.txt
+build/
+log.txt
