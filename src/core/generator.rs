@@ -341,7 +341,18 @@ impl CMakeGenerator {
 
             let content = self.render_module(module, &deps, graph)?;
             let module_cmake_path = module.path.join("CMakeLists.txt");
-            self.write_if_changed(&module_cmake_path, &content, &module.name, force)?;
+
+            // When the module lives in the project root directory, its
+            // CMakeLists.txt *is* the root CMakeLists.txt.  Append the
+            // module content (add_executable / add_library) below the
+            // root template rather than overwriting it, so that
+            // `cmake_minimum_required()` and `project()` are preserved.
+            if module_cmake_path == root_path {
+                let merged = format!("{}\n\n{}", root_content, content);
+                self.write_if_changed(&root_path, &merged, "root", force)?;
+            } else {
+                self.write_if_changed(&module_cmake_path, &content, &module.name, force)?;
+            }
         }
 
         Ok(())
@@ -414,7 +425,7 @@ impl CMakeGenerator {
         let ordered_names = graph.topological_order().unwrap_or_else(|_| {
             modules
                 .iter()
-                .filter(|m| !m.is_root)
+                .filter(|m| !m.is_root && m.path != self.config.root)
                 .map(|m| m.name.clone())
                 .collect()
         });
@@ -424,7 +435,7 @@ impl CMakeGenerator {
             .filter_map(|name| {
                 modules
                     .iter()
-                    .find(|m| &m.name == name && !m.is_root)
+                    .find(|m| &m.name == name && !m.is_root && m.path != self.config.root)
                     .map(|m| m.relative_path.to_string_lossy().to_string())
             })
             .collect();

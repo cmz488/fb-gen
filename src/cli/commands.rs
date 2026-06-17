@@ -13,7 +13,8 @@ use regex::Regex;
 
 use crate::cli::Cli;
 use crate::core::{CMakeGenerator, DependencyAnalyzer, ModuleDiscoverer, ZigGenerator};
-use crate::models::project::BuildSystem;
+use crate::core::zig_generator::zig_target;
+use crate::models::project::{BuildSystem, TargetArch};
 use crate::models::dependency::DependencyGraph;
 use crate::models::module::SourceFile;
 use crate::models::{
@@ -394,7 +395,8 @@ pub fn cmd_sync(cli: &Cli) -> FbGenResult<()> {
 
     // ── LSP ──────────────────────────────────────────────────────────
     if cli.lsp {
-        generate_compile_commands(&root, &config.output_dir, &config, &prev_meta.modules, None, &reporter);
+        let graph = rebuild_graph_from_snapshot(&prev_meta.dependency_graph);
+        generate_compile_commands(&root, &config.output_dir, &config, &prev_meta.modules, Some(&graph), &reporter);
     }
 
     // ── Watch loop ──────────────────────────────────────────────────────
@@ -494,7 +496,7 @@ fn generate_compile_commands(
     reporter: &Reporter,
 ) {
     if config.build_system == BuildSystem::Zig {
-        generate_compile_commands_zig(root, modules, graph, reporter);
+        generate_compile_commands_zig(root, config, modules, graph, reporter);
         return;
     }
 
@@ -1479,8 +1481,16 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
             ));
             let mut build_cmd = Command::new("zig");
             build_cmd.arg("build")
-                .arg("-p").arg(&build_dir)
-                .current_dir(&root);
+                .arg("-p").arg(&build_dir);
+            // Cross-compilation targets should use release-small to keep
+            // binary size within MCU flash/RAM limits. Zig 0.16 uses
+            // `--release=small` (not the older `-Doptimize=ReleaseSmall`).
+            if config.target_arch != TargetArch::X86_64
+                && config.target_arch != TargetArch::X86
+            {
+                build_cmd.arg("--release=small");
+            }
+            build_cmd.current_dir(&root);
             let (s, lines) = run_cmake_formatted(&mut build_cmd, cli.quiet)
                 .map_err(|e| FbGenError::Config(format!("zig build: {e}")))?;
             (s, lines)
@@ -1490,6 +1500,15 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
     if status.success() {
         let elapsed = start.elapsed();
         reporter.report_success(&format!("Build succeeded in {:.1}s", elapsed.as_secs_f64()));
+
+        // ── LSP (Zig) ──────────────────────────────────────────────
+        if cli.lsp && config.build_system == BuildSystem::Zig {
+            // Load cached modules for compile_commands.json generation.
+            if let Some(meta) = cache.load() {
+                let graph = rebuild_graph_from_snapshot(&meta.dependency_graph);
+                generate_compile_commands_zig(&root, &config, &meta.modules, Some(&graph), &reporter);
+            }
+        }
 
         // Highlight memory/flash usage summary, if present.
         if let Some(summary) = extract_memory_summary(&build_lines) {
@@ -1954,11 +1973,49 @@ fn generate_build_files(
     }
 }
 
+/// Parse the Zig library directory from `zig env` output (ZON format).
+fn zig_lib_dir() -> Option<String> {
+    let output = std::process::Command::new("zig")
+        .arg("env")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    // zig env outputs ZON (Zig Object Notation), not JSON.  Parse
+    // the `.lib_dir = "..."` field with a simple regex.
+    static ZIG_LIB_DIR_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| {
+            regex::Regex::new(r#"\.lib_dir\s*=\s*"([^"]*)""#)
+                .expect("ZIG_LIB_DIR_RE regex")
+        });
+    let lib_dir = ZIG_LIB_DIR_RE.captures(&stdout)?.get(1)?.as_str().to_string();
+    Some(lib_dir)
+}
+
+/// Find Zig's system C include path (`$lib_dir/include`).
+/// Returns `None` if Zig is not on PATH or the output can't be parsed.
+fn find_zig_include_path() -> Option<String> {
+    let lib_dir = zig_lib_dir()?;
+    let inc = format!("{}/include", lib_dir);
+    if std::path::Path::new(&inc).exists() {
+        Some(inc)
+    } else {
+        None
+    }
+}
+
+/// Find Zig's C++ standard library include path (`$lib_dir/libcxx/include`).
 /// Generate `compile_commands.json` for a Zig project using the project's
 /// own module metadata (source files, include dirs, compile definitions).
 /// Produces clang-compatible `zig cc` commands that clangd can parse.
+///
+/// Includes `-target`, `-std=`, `-mcpu=`, and `--sysroot` flags for
+/// correct cross-compilation analysis in the editor.
 fn generate_compile_commands_zig(
     root: &Path,
+    config: &ProjectConfig,
     modules: &[CMakeModule],
     graph: Option<&DependencyGraph>,
     reporter: &Reporter,
@@ -1969,6 +2026,40 @@ fn generate_compile_commands_zig(
     let module_map: std::collections::HashMap<&str, &CMakeModule> =
         modules.iter().map(|m| (m.name.as_str(), m)).collect();
     let mut entries: Vec<serde_json::Value> = Vec::new();
+
+    // ── Target flags ───────────────────────────────────────────────
+    let zt = zig_target(&config.target_arch);
+    let target_flag = format!("-target {}", zt.triple());
+
+    // clangd uses its own clang instance (NOT `zig c++`).  For C++
+    // analysis it relies on the system libstdc++ headers which are
+    // compatible with its clang version.  Zig's bundled libc++ is
+    // compiled for a different clang — injecting its paths causes
+    // "reference to unresolved using declaration" errors.
+    //
+    // We only add `-isystem <zig>/include` for C headers (stdint.h,
+    // stddef.h, etc.).  For cross-compilation targets `-target` and
+    // `-mcpu=` select the right ABI.
+    let zig_sys_inc = find_zig_include_path()
+        .map(|p| format!(" -isystem {}", p))
+        .unwrap_or_default();
+
+    // ── CPU / sysroot flags (cross-compilation only) ────────────────
+    let mut arch_flags = String::new();
+    let is_cross = zt.os_tag == "freestanding";
+    if is_cross {
+        if let Some(ref tc) = config.toolchain {
+            if !tc.cpu.is_empty() {
+                // Normalise GCC convention (cortex-m3) to Zig convention
+                // (cortex_m3) — Zig identifiers use underscores.
+                let cpu_normalised = tc.cpu.replace('-', "_");
+                arch_flags.push_str(&format!(" -mcpu={}", cpu_normalised));
+            }
+            if let Some(ref sysroot) = tc.sysroot {
+                arch_flags.push_str(&format!(" --sysroot {}", sysroot));
+            }
+        }
+    }
 
     for m in modules {
         let mut seen_dirs = std::collections::HashSet::new();
@@ -1993,15 +2084,31 @@ fn generate_compile_commands_zig(
         for inc in &m.include_dirs {
             add_dir(inc);
         }
-        // Dependency include paths.
+        // Dependency include paths (transitive closure — Zig modules don't
+        // propagate include paths through linkLibrary, so every module must
+        // explicitly list all transitive dependency include dirs).
         if let Some(g) = graph {
-            for (dep_name, _) in &g.get_dependencies(&m.name) {
+            let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut stack: Vec<String> = g.get_dependencies(&m.name)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect();
+            while let Some(dep_name) = stack.pop() {
+                if !visited.insert(dep_name.clone()) {
+                    continue;
+                }
                 if let Some(dep) = module_map.get(dep_name.as_str()) {
                     if !dep.relative_path.as_os_str().is_empty() {
                         add_dir(&root.join(&dep.relative_path));
                     }
                     for inc in &dep.include_dirs {
                         add_dir(inc);
+                    }
+                }
+                // Push transitive deps.
+                for (sub_name, _) in g.get_dependencies(&dep_name) {
+                    if !visited.contains(&sub_name) {
+                        stack.push(sub_name);
                     }
                 }
             }
@@ -2011,14 +2118,42 @@ fn generate_compile_commands_zig(
         for def in &m.compile_definitions {
             def_flags.push_str(&format!(" -D {}", def));
         }
+        // Include device defines from toolchain config, matching ZigGenerator.
+        if let Some(ref tc) = config.toolchain {
+            for dd in &tc.device_defines {
+                def_flags.push_str(&format!(" -D {}", dd));
+            }
+        }
 
         for src in &m.sources {
             if !src.source_type.is_source() {
                 continue;
             }
+            // Filter orphans to match build.zig — files that zig build
+            // won't compile shouldn't appear in compile_commands.json.
+            if !ZigGenerator::is_file_referenced(src, modules) {
+                continue;
+            }
+            // Per-file language standard — .c files get -std=c11,
+            // .cpp files get -std=c++17 regardless of project language.
+            let is_cxx = matches!(src.source_type, crate::models::module::SourceType::CppSource);
+            let std_flag = if is_cxx {
+                format!("-std=c++{}", config.cpp_standard)
+            } else {
+                format!("-std=c{}", config.c_standard)
+            };
+            // ── Driver ────────────────────────────────────────────
+            // `zig c++` / `zig cc` as driver tells clangd the language
+            // mode.  clangd does NOT execute the driver — it uses its
+            // own clang with the system's native C++ stdlib (libstdc++
+            // on Linux).  Zig's bundled libc++ is incompatible with
+            // the system clangd version, so we intentionally do NOT
+            // add -isystem to Zig's libcxx/ headers here.
+            let zig_driver = if is_cxx { "zig c++" } else { "zig cc" };
             let cmd = format!(
-                "zig cc{}{} -c {}",
-                inc_flags, def_flags,
+                "{} {} {} {}{}{}{} -c {}",
+                zig_driver, target_flag, std_flag,
+                inc_flags, def_flags, arch_flags, &zig_sys_inc,
                 src.relative_path.to_string_lossy(),
             );
             entries.push(serde_json::json!({

@@ -35,6 +35,7 @@ impl Default for ScanOptions {
                 "cmake-build-release".into(),
                 ".idea".into(),
                 ".vscode".into(),
+                ".fb-gen".into(),
             ],
             languages: vec![
                 "c".into(),
