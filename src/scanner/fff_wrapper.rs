@@ -117,7 +117,7 @@ impl FffScanner {
         let content = fs::read_to_string(file_path)?;
 
         // Match `#include "foo.h"` — capture the text between the quotes.
-        let re = Regex::new(r#"#include\s+"([^"]+)""#)?;
+        let re = Regex::new(r#"#include\s*"([^"]+)""#)?;
         let includes: Vec<String> = re
             .captures_iter(&content)
             .filter_map(|cap| cap.get(1))

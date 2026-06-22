@@ -3,7 +3,36 @@
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::orchestration::workflow::WorkflowPhase;
+/// Phases of the workflow pipeline (used for progress display).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowPhase {
+    /// Scanning source files on disk.
+    Scanning,
+    /// Discovering project structure and modules.
+    Discovering,
+    /// Analyzing dependencies between modules.
+    Analyzing,
+    /// Generating CMake configuration files.
+    Generating,
+    /// Validating generated output.
+    Validating,
+    /// All phases completed successfully.
+    Complete,
+}
+
+impl WorkflowPhase {
+    /// Return a human-readable label for the phase.
+    pub fn label(&self) -> &'static str {
+        match self {
+            WorkflowPhase::Scanning => "Scanning source files",
+            WorkflowPhase::Discovering => "Discovering modules",
+            WorkflowPhase::Analyzing => "Analyzing dependencies",
+            WorkflowPhase::Generating => "Generating CMake files",
+            WorkflowPhase::Validating => "Validating output",
+            WorkflowPhase::Complete => "Complete",
+        }
+    }
+}
 
 /// Renders workflow progress to the terminal using colored text and a
 /// single indicatif progress bar.

@@ -11,6 +11,12 @@ use crate::models::module::{CMakeModule, SourceFile, TargetType};
 use regex::Regex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+/// Regex for detecting `main()` function signatures in source files.
+pub(crate) static MAIN_FUNCTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:int|void)\s+main\s*\(").expect("MAIN_FUNCTION_RE regex")
+});
 
 /// Options controlling module discovery behaviour.
 #[derive(Debug, Clone)]
@@ -232,16 +238,14 @@ impl ModuleDiscoverer {
 
 /// Detect the presence of a `main()` function by reading file content.
 ///
-/// Searches for `int main(` or `void main(` patterns using a regex.
+/// Searches for `int main(` or `void main(` patterns using a shared static regex.
 fn has_main_function(sf: &SourceFile) -> bool {
     let content = match std::fs::read_to_string(&sf.path) {
         Ok(c) => c,
         Err(_) => return false,
     };
 
-    // Match `int main(` or `void main(` — handles whitespace between return type and name.
-    let re = Regex::new(r"(?:int|void)\s+main\s*\(").unwrap();
-    re.is_match(&content)
+    MAIN_FUNCTION_RE.is_match(&content)
 }
 
 /// Collect include directories for a module.

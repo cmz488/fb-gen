@@ -155,27 +155,82 @@ impl Default for DependencyAnalyzer {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::models::module::{SourceFile, SourceType};
+    use std::path::PathBuf;
 
-    #[test]
-    fn test_include_path_segment_extraction() {
-        // Verify that path segment extraction logic works correctly.
-        let inc = "core/foo.h";
-        let first = inc.split('/').next().unwrap();
-        assert_eq!(first, "core");
+    fn make_source(name: &str, source_type: SourceType, includes: Vec<&str>) -> SourceFile {
+        SourceFile {
+            path: PathBuf::from(name),
+            relative_path: PathBuf::from(name),
+            file_name: name.rsplit('/').next().unwrap_or(name).to_string(),
+            source_type,
+            includes: includes.into_iter().map(String::from).collect(),
+        }
+    }
 
-        let bare = "foo.h";
-        let first = bare.split('/').next().unwrap();
-        assert_eq!(first, "foo.h"); // bare — no '/' separator
-
-        let filename = bare.rsplit('/').next().unwrap();
-        assert_eq!(filename, "foo.h");
+    fn make_module(name: &str, rel_path: &str, sources: Vec<SourceFile>, headers: Vec<SourceFile>) -> CMakeModule {
+        CMakeModule {
+            name: name.into(),
+            path: PathBuf::from(rel_path),
+            relative_path: PathBuf::from(rel_path),
+            sources,
+            headers,
+            asm_sources: vec![],
+            linker_scripts: vec![],
+            dependencies: vec![],
+            target_type: crate::models::module::TargetType::StaticLibrary,
+            is_root: false,
+            has_main: false,
+            compile_features: vec![],
+            compile_definitions: vec![],
+            include_dirs: vec![PathBuf::from(rel_path)],
+        }
     }
 
     #[test]
-    fn test_include_filename_fallback() {
-        // Verify that a bare include resolves to a module with matching header.
-        let inc = "utils.h";
-        let filename = inc.rsplit('/').next().unwrap();
-        assert_eq!(filename, "utils.h");
+    fn test_analyze_empty_modules() {
+        let analyzer = DependencyAnalyzer::new();
+        let graph = analyzer.analyze(&[]).unwrap();
+        assert_eq!(graph.node_count(), 0);
+        assert_eq!(graph.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_analyze_no_includes() {
+        let a = make_module("a", "a", vec![make_source("a/a.c", SourceType::CSource, vec![])], vec![]);
+        let b = make_module("b", "b", vec![make_source("b/b.c", SourceType::CSource, vec![])], vec![]);
+        let analyzer = DependencyAnalyzer::new();
+        let graph = analyzer.analyze(&[a, b]).unwrap();
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_analyze_path_segment_dependency() {
+        let a = make_module("a", "a", vec![make_source("a/a.c", SourceType::CSource, vec!["b/b.h"])], vec![]);
+        let b = make_module("b", "b", vec![make_source("b/b.c", SourceType::CSource, vec![])], vec![make_source("b/b.h", SourceType::CHeader, vec![])]);
+        let analyzer = DependencyAnalyzer::new();
+        let graph = analyzer.analyze(&[a, b]).unwrap();
+        let a_deps = graph.get_dependencies("a");
+        assert!(a_deps.iter().any(|(n, _)| n == "b"), "a should depend on b via #include \"b/b.h\"");
+    }
+
+    #[test]
+    fn test_analyze_self_reference_excluded() {
+        let a = make_module("a", "a", vec![make_source("a/a.c", SourceType::CSource, vec!["a.h"])], vec![make_source("a/a.h", SourceType::CHeader, vec![])]);
+        let analyzer = DependencyAnalyzer::new();
+        let graph = analyzer.analyze(&[a]).unwrap();
+        assert!(graph.get_dependencies("a").is_empty(), "self-reference via own header should be excluded");
+    }
+
+    #[test]
+    fn test_analyze_bare_include_fallback() {
+        let a = make_module("a", "a", vec![make_source("a/a.c", SourceType::CSource, vec!["utils.h"])], vec![]);
+        let b = make_module("b", "b", vec![make_source("b/b.c", SourceType::CSource, vec![])], vec![make_source("b/utils.h", SourceType::CHeader, vec![])]);
+        let analyzer = DependencyAnalyzer::new();
+        let graph = analyzer.analyze(&[a, b]).unwrap();
+        let a_deps = graph.get_dependencies("a");
+        assert!(a_deps.iter().any(|(n, _)| n == "b"), "a should depend on b via bare include \"utils.h\"");
     }
 }

@@ -177,7 +177,7 @@ impl Default for ProjectConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DependencySnapshot {
     pub nodes: Vec<String>,
-    pub edges: Vec<(String, String)>,
+    pub edges: Vec<(String, String, crate::models::dependency::DependencyType)>,
 }
 
 /// Runtime metadata about the project, for caching and incremental updates.

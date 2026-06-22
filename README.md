@@ -95,24 +95,34 @@ fb-gen init --build zig --name ESP32 # Zig 项目并指定名称
 fb-gen sync
 fb-gen sync --root /path/to/project
 fb-gen sync --lsp                  # 同时更新 compile_commands.json
+fb-gen sync --watch                # 启用文件监控，检测到变更自动同步
 ```
+
+**增量同步流程：** 通过对每个文件计算 djb2 校验和，与缓存快照对比，精准识别新增、修改和删除的文件。仅当 `#include` 指令发生变化时才重新运行依赖分析，否则复用缓存的依赖图。已删除文件的孤立校验和会被自动清理。
 
 ### `fb-gen check`
 
-检查项目结构：对比当前目录结构与已有构建文件的差异，以 diff 形式输出。
+检查项目结构：将当前扫描结果重新生成到临时目录，与现有构建文件逐行对比差异。
 
 ```sh
 fb-gen check
 fb-gen check --root /path/to/project
 ```
 
+- **CMake 项目：** 对比根 `CMakeLists.txt` 和每个模块目录下的 `CMakeLists.txt`
+- **Zig 项目：** 对比 `build.zig`
+
 ### `fb-gen validate`
 
-验证当前项目配置的正确性。
+验证生成的构建配置是否能被构建工具正确解析。
 
 ```sh
 fb-gen validate
+fb-gen validate --lsp               # 同时生成 compile_commands.json
 ```
+
+- **CMake 项目：** 运行 `cmake -S . -B <build_dir>` 进行实际配置验证
+- **Zig 项目：** 运行 `zig build` 解析 `build.zig`，检查语法和类型正确性
 
 ### `fb-gen run`
 
@@ -156,11 +166,16 @@ fb-gen run --lsp                 # 构建后生成 compile_commands.json
 # 初始化 Zig 项目
 fb-gen init --build zig
 
+# 验证 build.zig 是否正确
+fb-gen validate
+
 # 运行（扫描 → 生成 build.zig → zig build）
 fb-gen run
 ```
 
-`fb-gen init --build zig` 会生成 `build.zig`（而非 `CMakeLists.txt`）。`fb-gen run` 会自动调用 `zig build` 完成构建。
+`fb-gen init --build zig` 会生成 `build.zig`（而非 `CMakeLists.txt`）。`fb-gen run` 会自动调用 `zig build` 完成构建。`fb-gen sync` 在检测到 `build.zig` 内容变化时会写入 `build.zig.new` 而非直接覆盖，保留手动修改的机会。
+
+> **注意：** Zig 构建系统不支持 CMake 的 `add_subdirectory` 等效机制。项目中用户自定义的 CMake 模块（如 CubeMX 生成的 `Drivers/CMakeLists.txt`）无法自动集成到 `build.zig` 中，fb-gen 会打印警告提示手动处理。
 
 ### 支持的交叉编译目标
 
@@ -179,25 +194,55 @@ fb-gen run
 
 对于交叉编译目标，`fb-gen run` 会自动添加 `--release=small` 优化选项以控制二进制体积（适合 MCU Flash/RAM 限制）。CPU 型号可以通过工具链配置指定（如 `cortex-m3` → Zig 的 `cortex_m3`）。
 
+### CMake 交叉编译工具链
+
+对于 CMake 项目，当目标架构需要交叉编译时，fb-gen 会自动在 `cmake/toolchain.cmake` 中生成完整的工具链文件，包含：
+- 编译器前缀（如 `arm-none-eabi-`）和交叉编译器路径
+- MCU 特定标志（`-mcpu=`、`-mfloat-abi=`、`-mfpu=` for ARM；`-march=`、`-mabi=` for RISC-V）
+- 链接器标志（`--specs=nano.specs` for ARM bare-metal，`-nostartfiles` for RISC-V）
+- `CMAKE_SYSROOT` 和 `CMAKE_FIND_ROOT_PATH`（当编译器提供 sysroot 时）
+- 内存使用报告（`--print-memory-usage`）
+
+如果用户已存在自定义工具链文件（如 STM32CubeMX 生成），fb-gen 不会覆盖。工具链文件支持 `# USER_START` / `# USER_END` 标记以保留用户自定义内容。
+
+`ARM32` 和 `ARM64` 目标在配置了工具链前缀时也会生成 Linux 用户空间交叉编译工具链（使用 `g++` 作为链接器）。
+
+## 用户自定义保留
+
+fb-gen 生成的构建文件中包含 `# USER_START` / `# USER_END` 标记块。用户在这些标记之间添加的自定义内容会在重新生成时自动保留：
+
+```cmake
+# ── User customisations ─────────────────────────────────────────────────────
+# USER_START
+add_subdirectory(Drivers)          # 用户添加的自定义模块
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DMY_DEFINE")
+# USER_END
+```
+
+在 `sync` 模式（`force=false`）下，如果生成内容与现有文件不同，fb-gen 会写入 `.new` 文件（如 `CMakeLists.txt.new`）并提示 diff 命令，而非直接覆盖。这适用于 CMake 和 Zig 两种构建系统。
+
+此外，fb-gen 会自动检测项目中的用户自定义 `CMakeLists.txt`（非 fb-gen 生成），并将其作为子目录添加到根构建文件中，同时过滤与 fb-gen 自身模块源文件重叠的用户模块，避免重复编译。
+
 ## LSP 支持
 
-`--lsp` 标志会在命令完成后自动生成 `compile_commands.json`，供 clangd 等语言服务器使用，在编辑器中提供准确的代码补全、跳转和诊断。
+`--lsp` 标志会在命令完成后自动生成 `compile_commands.json`，供 clangd 等语言服务器使用，在编辑器中提供准确的代码补全、跳转和诊断。适用于所有命令。
 
 ```sh
 fb-gen run --lsp      # 构建后生成 compile_commands.json
 fb-gen sync --lsp     # 增量同步后生成
 fb-gen init --lsp     # 初始化后生成
+fb-gen validate --lsp # 验证后生成
 ```
 
-**CMake 项目：** 基于项目模块元数据生成标准 clang 编译命令。
+**CMake 项目：** 运行 `cmake configure` 并传递 `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`，然后将生成的 `compile_commands.json` 符号链接到项目根目录。
 
-**Zig 项目：** 使用 `zig c++` / `zig cc` 作为驱动，自动注入：
+**Zig 项目：** 基于模块元数据直接生成 `compile_commands.json`，使用 `zig c++` / `zig cc` 作为驱动，自动注入：
 - 正确的 `-target` 目标三元组
 - `-std=` 语言标准标志
 - `-mcpu=` CPU 型号（交叉编译时）
 - `--sysroot` 系统根目录（交叉编译时）
 - Zig 的 C 系统头文件路径
-- 完整的传递依赖 include 路径
+- 完整的传递依赖 include 路径（使用记忆化 DFS 高效计算）
 
 ## 模块发现规则
 
@@ -205,33 +250,38 @@ fb-gen init --lsp     # 初始化后生成
 - 检测到 `int main(` 或 `void main(` → 可执行文件目标
 - 头文件（`.h`/`.hpp`）归属于其目录所在模块
 - 汇编文件（`.s`/`.S`）和链接脚本（`.ld`）同样被识别
-- 纯头文件目录 → HeaderOnly 目标
-- 汇编 + 头文件 → StaticLibrary 目标
-- 其他模块默认 → StaticLibrary 目标
+- 纯头文件目录 → `HeaderOnly` 目标
+- 汇编 + 头文件 → `StaticLibrary` 目标
+- 根目录的源文件/汇编文件会被合并到第一个可执行模块中
+- 孤儿链接脚本（无对应源文件的目录中的 `.ld`）会归属于根模块
+- 其他模块默认 → `StaticLibrary` 目标
 - 默认排除目录：`build`, `.git`, `third_party`, `cmake-build-*`, `.idea`, `.vscode`
+
+增量同步时，文件的 `main()` 函数变化（新增或删除）会触发模块目标类型自动调整（`StaticLibrary` ↔ `Executable`）。
 
 ## 依赖分析策略
 
-对于每个 `#include "xxx/yyy.h"` 指令：
-1. 提取第一个路径段（`xxx`），匹配已知模块名
-2. 尝试模块全名匹配（如 `src_core`）
-3. 回退到目录短名匹配（如 `core` 匹配路径以 `core` 结尾的模块）
-4. 匹配成功 → 建立 PUBLIC 依赖边
+对于每个 `#include "xxx/yyy.h"` 指令，采用三级匹配策略：
 
-尖括号引用（`#include <...>`）被忽略。汇编文件（`.S`）同样被扫描（经过 C 预处理器）。
+1. **路径段匹配** — 提取第一个路径段（`xxx`），匹配已知模块名
+2. **目录短名匹配** — 回退到目录基名匹配（如 `core` 匹配路径以 `core` 结尾的模块）
+3. **文件名回退（裸 include）** — 对于无路径分隔符的 `#include "foo.h"`，在所有模块的 headers 列表中查找匹配的头文件名
+
+匹配成功 → 建立 `PUBLIC` 依赖边。尖括号引用（`#include <...>`）被忽略。汇编文件（`.S`）同样被扫描（经过 C 预处理器）。依赖类型（PUBLIC/PRIVATE/INTERFACE）在缓存序列化中完整保留。
 
 ## 架构
 
 ```
 CLI 交互层 (clap)
-  └── 编排与协调层 (workflow / pipeline / reporter / cache / watcher)
+  └── 编排与协调层 (reporter / cache / watcher / query)
         └── 核心业务逻辑层
-              ├── ModuleDiscoverer — 模块发现
-              ├── DependencyAnalyzer — 依赖分析（petgraph）
+              ├── ModuleDiscoverer — 模块发现与分组
+              ├── DependencyAnalyzer — 依赖分析（petgraph DiGraph）
               ├── CMakeGenerator — CMakeLists.txt 生成（Tera 模板）
               ├── ZigGenerator — build.zig 生成（Tera 模板）
-              └── ConfigInferrer — C++ 标准特性推断
-                    └── 外部依赖层 (walkdir / tera / serde)
+              ├── ConfigInferrer — C++ 标准特性推断
+              └── ToolchainDetect — 交叉编译工具链自动检测
+                    └── 扫描层 (FffScanner / walkdir)
 ```
 
 **关键数据流：**

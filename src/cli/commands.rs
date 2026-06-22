@@ -33,15 +33,12 @@ use crate::scanner::{self, FffScanner};
 /// CMake variables like `${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/main.c`.
 static CMAKE_SOURCE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"(?:(?:\.\./)+|(?:[a-zA-Z0-9_/.+-]+/)*[a-zA-Z0-9_/.+-]+)\.(?:c|cpp|cc|cxx|s|S)\b"#,
+        r#"((?:(?:\.\./)+|(?:[a-zA-Z0-9_/.+-]+/)*[a-zA-Z0-9_/.+-]+)\.(?:c|cpp|cc|cxx|s|S)\b)"#,
     )
     .expect("CMAKE_SOURCE_PATH_RE regex")
 });
 
-/// Regex for detecting `main()` function signatures in source files.
-static MAIN_FUNCTION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:int|void)\s+main\s*\(").expect("MAIN_FUNCTION_RE regex")
-});
+// MAIN_FUNCTION_RE is now defined in crate::core::discoverer and re-used here.
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -310,18 +307,20 @@ pub fn cmd_init(cli: &Cli, name: Option<&str>, build: Option<&str>) -> FbGenResu
     generate_build_files(&config, &modules, ref_graph, true, &user_modules)?;
     reporter.report_success("Build files generated");
 
-    // ── Scan presets & toolchain files ──
+    // ── Scan presets & toolchain files (CMake only) ──
     let scanner = FffScanner::new(&root);
-    config.cmake_presets = scanner.scan_presets(&root)?;
-    config.toolchain_files = scanner.scan_toolchain_files(&root, &config.exclude_dirs)?;
-    if config.cmake_presets.is_some() {
-        reporter.report_info("CMakePresets.json detected and parsed");
-    }
-    if !config.toolchain_files.is_empty() {
-        reporter.report_info(&format!(
-            "Found {} toolchain file(s)",
-            config.toolchain_files.len()
-        ));
+    if config.build_system == BuildSystem::CMake {
+        config.cmake_presets = scanner.scan_presets(&root)?;
+        config.toolchain_files = scanner.scan_toolchain_files(&root, &config.exclude_dirs)?;
+        if config.cmake_presets.is_some() {
+            reporter.report_info("CMakePresets.json detected and parsed");
+        }
+        if !config.toolchain_files.is_empty() {
+            reporter.report_info(&format!(
+                "Found {} toolchain file(s)",
+                config.toolchain_files.len()
+            ));
+        }
     }
 
     // ── Device defines: switch presets to fb-gen's toolchain ────────
@@ -381,8 +380,10 @@ pub fn cmd_sync(cli: &Cli) -> FbGenResult<()> {
     let start = Instant::now();
     let n_affected = do_incremental_sync(&root, &mut config, &mut prev_meta, &reporter)?;
 
+    // Always persist so orphan checksum cleanups are durable.
+    save_sync_result(&cache, &config, &prev_meta)?;
+
     if n_affected > 0 {
-        save_sync_result(&cache, &config, &prev_meta)?;
         let elapsed = start.elapsed();
         reporter.report_success(&format!(
             "Sync done in {:.1}s — {} module(s) updated",
@@ -457,16 +458,17 @@ fn save_sync_result(
     config: &ProjectConfig,
     prev_meta: &ProjectMeta,
 ) -> FbGenResult<()> {
+    let graph = rebuild_graph_from_snapshot(&prev_meta.dependency_graph);
     let dep_snapshot = DependencySnapshot {
         nodes: prev_meta.modules.iter().map(|m| m.name.clone()).collect(),
         edges: prev_meta
             .modules
             .iter()
             .flat_map(|m| {
-                rebuild_graph_from_snapshot(&prev_meta.dependency_graph)
+                graph
                     .get_dependencies(&m.name)
                     .into_iter()
-                    .map(|(dep_name, _)| (m.name.clone(), dep_name))
+                    .map(|(dep_name, dep_type)| (m.name.clone(), dep_name, dep_type))
             })
             .collect(),
     };
@@ -737,16 +739,18 @@ fn do_incremental_sync(
         reporter.report_info("Dependencies unchanged — skipping re-analysis.");
     }
 
-    // ── 5. Regenerate CMakeLists.txt ──
+    // ── 4. Regenerate build files ──
     reporter.report_info("Regenerating affected build files ...");
     let user_modules = scanner.scan_user_cmake_files(root, &config.exclude_dirs);
     let user_modules = filter_overlapping_user_modules(user_modules, &modules, root, reporter);
     generate_build_files(config, &modules, &graph, true, &user_modules)?;
     reporter.report_success(&format!("{} module(s) updated", n_affected));
 
-    // ── 6. Refresh presets & toolchain file list ──
-    config.cmake_presets = scanner.scan_presets(root)?;
-    config.toolchain_files = scanner.scan_toolchain_files(root, &config.exclude_dirs)?;
+    // ── 6. Refresh presets & toolchain file list (CMake only) ──
+    if config.build_system == BuildSystem::CMake {
+        config.cmake_presets = scanner.scan_presets(root)?;
+        config.toolchain_files = scanner.scan_toolchain_files(root, &config.exclude_dirs)?;
+    }
 
     // ── 7. Device defines: ensure fb-gen's toolchain is active ──
     if config.build_system == BuildSystem::CMake {
@@ -766,7 +770,7 @@ fn do_incremental_sync(
                 graph
                     .get_dependencies(&m.name)
                     .into_iter()
-                    .map(|(dep_name, _)| (m.name.clone(), dep_name))
+                    .map(|(dep_name, dep_type)| (m.name.clone(), dep_name, dep_type))
             })
             .collect(),
     };
@@ -920,6 +924,19 @@ fn update_file_in_modules(
         if let Some(pos) = found {
             if new_sf.source_type.is_source() {
                 m.sources[pos] = new_sf;
+                // Re-check has_main: a modified source may have gained or lost
+                // a main() function, requiring a target type change.
+                let has_main = m.sources.iter().any(|s| source_has_main(s));
+                if has_main != m.has_main {
+                    m.has_main = has_main;
+                    m.target_type = if has_main {
+                        crate::models::module::TargetType::Executable
+                    } else if m.sources.is_empty() && m.asm_sources.is_empty() {
+                        crate::models::module::TargetType::HeaderOnly
+                    } else {
+                        crate::models::module::TargetType::StaticLibrary
+                    };
+                }
             } else if new_sf.source_type.is_header() {
                 m.headers[pos] = new_sf;
             } else if new_sf.source_type.is_asm() {
@@ -1042,6 +1059,22 @@ fn remove_file_from_modules(
             || m.asm_sources.len() != old_asm_len
             || m.linker_scripts.len() != old_ld_len
         {
+            // Re-check has_main and target_type: a deleted source may have
+            // been the only file with main(), requiring downgrade from
+            // Executable to StaticLibrary.
+            let has_main = m.sources.iter().any(|s| source_has_main(s));
+            let prev_has_main = m.has_main;
+            if has_main != prev_has_main {
+                m.has_main = has_main;
+                m.target_type = if has_main {
+                    crate::models::module::TargetType::Executable
+                } else if m.sources.is_empty() && m.asm_sources.is_empty() {
+                    crate::models::module::TargetType::HeaderOnly
+                } else {
+                    crate::models::module::TargetType::StaticLibrary
+                };
+            }
+
             affected.insert(m.name.clone());
         }
 
@@ -1060,7 +1093,7 @@ fn remove_file_from_modules(
 /// Quick check if a SourceFile contains a main() function.
 fn source_has_main(sf: &SourceFile) -> bool {
     if let Ok(content) = std::fs::read_to_string(&sf.path) {
-        MAIN_FUNCTION_RE.is_match(&content)
+        crate::core::discoverer::MAIN_FUNCTION_RE.is_match(&content)
     } else {
         false
     }
@@ -1072,11 +1105,11 @@ fn rebuild_graph_from_snapshot(snap: &DependencySnapshot) -> DependencyGraph {
     for node in &snap.nodes {
         graph.add_module(node);
     }
-    for (from, to) in &snap.edges {
+    for (from, to, dep_type) in &snap.edges {
         graph.add_dependency(crate::models::dependency::DependencyEdge {
             from: from.clone(),
             to: to.clone(),
-            dep_type: crate::models::dependency::DependencyType::Private,
+            dep_type: dep_type.clone(),
         });
     }
     graph
@@ -1111,7 +1144,7 @@ fn save_meta_cache(
                 .flat_map(|m| {
                     g.get_dependencies(&m.name)
                         .into_iter()
-                        .map(|(dep_name, _)| (m.name.clone(), dep_name))
+                        .map(|(dep_name, dep_type)| (m.name.clone(), dep_name, dep_type))
                 })
                 .collect(),
         }
@@ -1161,7 +1194,7 @@ pub fn cmd_check(cli: &Cli) -> FbGenResult<()> {
         tempfile::TempDir::new().map_err(|e| FbGenError::Config(format!("tempdir: {e}")))?;
     let tmp_root = tmp_dir.path();
 
-    // Generate root CMakeLists.txt to temp.
+    // Generate build files to temp directory for comparison.
     let mut tmp_config = config.clone();
     tmp_config.root = tmp_root.to_path_buf();
 
@@ -1220,7 +1253,30 @@ pub fn cmd_validate(cli: &Cli) -> FbGenResult<()> {
     let config = load_or_default_config(&root, &cli.output);
 
     if config.build_system == BuildSystem::Zig {
-        reporter.report_info("Zig projects are validated by `zig build` — skipping cmake.");
+        reporter.report_info("Validating Zig build configuration ...");
+        let output = Command::new("zig")
+            .arg("build")
+            .arg("--help") // triggers build.zig parsing without actual build
+            .current_dir(&root)
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                reporter.report_success("Zig build configuration is valid.");
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                reporter.report_error("Zig build configuration failed:");
+                eprintln!("{}", stderr);
+                return Err(FbGenError::GenerationFailed(
+                    "zig build validation failed".into(),
+                ));
+            }
+            Err(e) => {
+                reporter.report_warning(&format!(
+                    "Cannot run zig for validation (is zig installed?): {e}"
+                ));
+            }
+        }
         return Ok(());
     }
 
@@ -1235,11 +1291,10 @@ pub fn cmd_validate(cli: &Cli) -> FbGenResult<()> {
         }
     }
 
-    let gen_str = if gen_flags.is_empty() {
-        String::new()
-    } else {
-        format!(" -G {}", gen_flags[1])
-    };
+    let gen_str = gen_flags
+        .get(1)
+        .map(|name| format!(" -G {}", name))
+        .unwrap_or_default();
     reporter.report_info(&format!(
         "Running cmake -S {} -B {}{} ...",
         root.display(),
@@ -1359,9 +1414,11 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
         match cache.load() {
             Some(mut prev_meta) => {
                 match do_incremental_sync(&root, &mut config, &mut prev_meta, &reporter) {
-                    Ok(n) if n > 0 => {
-                        // Persist updated metadata (hash was already
-                        // computed and stored by do_incremental_sync).
+                    Ok(n) => {
+                        // Persist updated metadata always so that checksum
+                        // cleanups (e.g. orphan removal for deleted files) are
+                        // durable — otherwise the next run re-detects the same
+                        // deletions.
                         let meta = ProjectMeta {
                             config: config.clone(),
                             modules: prev_meta.modules,
@@ -1374,12 +1431,11 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
                                 "Failed to save synced metadata: {}. Build will proceed.",
                                 e
                             ));
-                        } else {
+                        } else if n > 0 {
                             reporter.report_success("CMakeLists.txt synced before build");
+                        } else {
+                            reporter.report_info("No source changes — skipping sync");
                         }
-                    }
-                    Ok(_) => {
-                        reporter.report_info("No source changes — skipping sync");
                     }
                     Err(e) => {
                         // Sync failure shouldn't block the build — the
@@ -1434,11 +1490,10 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
     let start = Instant::now();
     let (status, build_lines) = match config.build_system {
         BuildSystem::CMake => {
-            let gen_str = if gen_flags.is_empty() {
-                String::new()
-            } else {
-                format!(" -G {}", gen_flags[1])
-            };
+            let gen_str = gen_flags
+                .get(1)
+                .map(|name| format!(" -G {}", name))
+                .unwrap_or_default();
             reporter.report_info(&format!(
                 "Configuring with cmake -S {} -B {}{} ...",
                 root.display(),
@@ -1454,6 +1509,9 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
             for f in &toolchain_args {
                 cmd.arg(f);
             }
+            if cli.lsp {
+                cmd.arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
+            }
             with_toolchain_path(&mut cmd, &config);
             let (s, _cfg_lines) = run_cmake_formatted(&mut cmd, cli.quiet)
                 .map_err(|e| FbGenError::Config(format!("cmake: {e}")))?;
@@ -1462,6 +1520,17 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
             }
 
             // ── LSP symlink ──────────────────────────────────────────
+            if cli.lsp {
+                let cc_json = build_dir.join("compile_commands.json");
+                if cc_json.exists() {
+                    match symlink_or_copy(&cc_json, &root.join("compile_commands.json")) {
+                        Ok(()) => reporter.report_success("compile_commands.json → project root"),
+                        Err(e) => reporter.report_warning(&format!(
+                            "compile_commands.json symlink failed: {e}"
+                        )),
+                    }
+                }
+            }
 
             // Build.
             reporter.report_info(&format!(
@@ -1507,6 +1576,11 @@ pub fn cmd_run(cli: &Cli) -> FbGenResult<()> {
             if let Some(meta) = cache.load() {
                 let graph = rebuild_graph_from_snapshot(&meta.dependency_graph);
                 generate_compile_commands_zig(&root, &config, &meta.modules, Some(&graph), &reporter);
+            } else {
+                reporter.report_warning(
+                    "No cache found — compile_commands.json not generated. \
+                     Run `fb-gen init` first, or re-run `fb-gen run`.",
+                );
             }
         }
 
@@ -2061,6 +2135,71 @@ fn generate_compile_commands_zig(
         }
     }
 
+    // ── Pre-compute transitive include dirs per module (memoized DFS) ──
+    // Each module's transitive include set is cached so we avoid O(n²)
+    // repeated traversals of the dependency graph.
+    let mut transitive_cache: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
+    /// Memoised DFS: collect absolute include paths for `name` and all
+    /// transitive dependencies, caching results as we go.
+    fn collect_transitive_includes(
+        name: &str,
+        module_map: &std::collections::HashMap<&str, &CMakeModule>,
+        graph: Option<&DependencyGraph>,
+        root: &Path,
+        cache: &mut std::collections::HashMap<String, Vec<String>>,
+    ) -> Vec<String> {
+        if let Some(cached) = cache.get(name) {
+            return cached.clone();
+        }
+        // Insert sentinel BEFORE recursion so cyclic re-entry hits the
+        // cache and returns immediately instead of recursing forever.
+        cache.insert(name.to_string(), Vec::new());
+        let mut dirs: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut add = |dirs: &mut Vec<String>, p: &Path| {
+            let d = if p.is_absolute() {
+                p.to_string_lossy().to_string()
+            } else {
+                root.join(p).to_string_lossy().to_string()
+            };
+            if !d.is_empty() && !d.contains(".zig-cache") && seen.insert(d.clone()) {
+                dirs.push(d);
+            }
+        };
+        if let Some(dep) = module_map.get(name) {
+            if !dep.relative_path.as_os_str().is_empty() {
+                add(&mut dirs, &root.join(&dep.relative_path));
+            }
+            for inc in &dep.include_dirs {
+                add(&mut dirs, inc);
+            }
+        }
+        if let Some(g) = graph {
+            for (sub_name, _) in g.get_dependencies(name) {
+                let sub =
+                    collect_transitive_includes(&sub_name, module_map, graph, root, cache);
+                for d in sub {
+                    let resolved = if std::path::Path::new(&d).is_absolute() {
+                        d
+                    } else {
+                        root.join(&d).to_string_lossy().to_string()
+                    };
+                    if !resolved.is_empty()
+                        && !resolved.contains(".zig-cache")
+                        && seen.insert(resolved.clone())
+                    {
+                        dirs.push(resolved);
+                    }
+                }
+            }
+        }
+        // Overwrite sentinel with actual results.
+        cache.insert(name.to_string(), dirs.clone());
+        dirs
+    }
+
     for m in modules {
         let mut seen_dirs = std::collections::HashSet::new();
         let mut inc_flags = String::new();
@@ -2084,31 +2223,19 @@ fn generate_compile_commands_zig(
         for inc in &m.include_dirs {
             add_dir(inc);
         }
-        // Dependency include paths (transitive closure — Zig modules don't
-        // propagate include paths through linkLibrary, so every module must
-        // explicitly list all transitive dependency include dirs).
+        // Dependency include paths via memoized transitive closure.
         if let Some(g) = graph {
-            let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let mut stack: Vec<String> = g.get_dependencies(&m.name)
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect();
-            while let Some(dep_name) = stack.pop() {
-                if !visited.insert(dep_name.clone()) {
-                    continue;
-                }
-                if let Some(dep) = module_map.get(dep_name.as_str()) {
-                    if !dep.relative_path.as_os_str().is_empty() {
-                        add_dir(&root.join(&dep.relative_path));
-                    }
-                    for inc in &dep.include_dirs {
-                        add_dir(inc);
-                    }
-                }
-                // Push transitive deps.
-                for (sub_name, _) in g.get_dependencies(&dep_name) {
-                    if !visited.contains(&sub_name) {
-                        stack.push(sub_name);
+            for (dep_name, _) in g.get_dependencies(&m.name) {
+                for dep_dir in collect_transitive_includes(
+                    &dep_name,
+                    &module_map,
+                    Some(g),
+                    root,
+                    &mut transitive_cache,
+                ) {
+                    if !seen_dirs.contains(&dep_dir) {
+                        inc_flags.push_str(&format!(" -I {}", dep_dir));
+                        seen_dirs.insert(dep_dir);
                     }
                 }
             }

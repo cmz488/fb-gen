@@ -20,14 +20,7 @@ use crate::models::module::{CMakeModule, SourceFile, SourceType, TargetType};
 use crate::models::project::{ProjectConfig, TargetArch};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::LazyLock;
-use regex::Regex;
-
-/// Regex matching `int main(` or `void main(` — used to identify entry-point
-/// source files during orphan filtering.
-static MAIN_FUNCTION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:int|void)\s+main\s*\(").expect("MAIN_FUNCTION_RE regex")
-});
+// MAIN_FUNCTION_RE is re-used from crate::core::discoverer.
 
 // ── Zig target descriptor ───────────────────────────────────────────────────
 
@@ -421,7 +414,7 @@ impl ZigGenerator {
         // Entry-point: file contains main() declaration.
         if sf.source_type.is_source() {
             if let Ok(content) = std::fs::read_to_string(&sf.path) {
-                if MAIN_FUNCTION_RE.is_match(&content) {
+                if crate::core::discoverer::MAIN_FUNCTION_RE.is_match(&content) {
                     return true;
                 }
             }
@@ -456,9 +449,21 @@ impl ZigGenerator {
         &self,
         modules: &[CMakeModule],
         graph: &DependencyGraph,
-        _force: bool,
-        _user_modules: &[PathBuf],
+        force: bool,
+        user_modules: &[PathBuf],
     ) -> FbGenResult<()> {
+        // ── User module warning ───────────────────────────────────────
+        // Zig's build system has no add_subdirectory equivalent; user-defined
+        // CMake modules cannot be automatically integrated.
+        if !user_modules.is_empty() {
+            eprintln!(
+                "fb-gen warning: {} user-defined CMake module(s) detected but \
+                 Zig build system does not support automatic integration: {:?}",
+                user_modules.len(),
+                user_modules,
+            );
+        }
+
         let target = zig_target(&self.config.target_arch);
         let is_cross = target.os_tag == "freestanding";
         let cpu_model = self.resolve_cpu_model(&target);
@@ -660,9 +665,8 @@ impl ZigGenerator {
                 .map(|s| s.relative_path.to_string_lossy().to_string())
                 .collect();
 
-            let is_executable = (m.has_main || m.is_root)
-                && (!c_source_paths.is_empty() || !cxx_source_paths.is_empty())
-                && m.target_type != TargetType::HeaderOnly;
+            let is_executable = m.target_type == TargetType::Executable
+                && (!c_source_paths.is_empty() || !cxx_source_paths.is_empty());
 
             if is_executable {
                 actual_exes.push(m.name.clone());
@@ -902,7 +906,24 @@ impl ZigGenerator {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).map_err(FbGenError::Io)?;
         }
-        fs::write(&dest, rendered).map_err(FbGenError::Io)?;
+
+        // ── Write with force/sync differentiation ──────────────────
+        // force=true (init): always overwrite.
+        // force=false (sync): write .new if content differs.
+        if dest.exists() && !force {
+            let existing = fs::read_to_string(&dest).map_err(FbGenError::Io)?;
+            if existing.trim() != rendered.trim() {
+                let new_path = dest.with_extension("zig.new");
+                fs::write(&new_path, &rendered).map_err(FbGenError::Io)?;
+                eprintln!(
+                    "fb-gen: build.zig already exists and differs — wrote {}",
+                    new_path.display()
+                );
+                eprintln!("fb-gen:   diff {} {}", dest.display(), new_path.display());
+            }
+        } else {
+            fs::write(&dest, rendered).map_err(FbGenError::Io)?;
+        }
 
         Ok(())
     }
